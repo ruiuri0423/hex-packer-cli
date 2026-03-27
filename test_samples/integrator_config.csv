@@ -1,0 +1,4 @@
+Name,Relative_Path,Address_Hex,Enabled
+Table_A,Table_A.xlsx,0x1000,Yes
+Table_B,Table_B.xlsx,0x1300,Yes
+Table_C,Table_C.xlsx,0x2000,Yes

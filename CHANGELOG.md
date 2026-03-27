@@ -1,9 +1,5 @@
 # Changelog
 
-All notable changes to this project will be documented in this file.
-
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
-
 ## [1.1.0] - 2026-03-27
 
 ### Changed
@@ -21,6 +17,14 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - `calculate_enable_mask_with_gaps()` - Gap-aware mask calculation
 - `detect_flash_address_gaps()` - Gap detection for HEX generation
 - Mask byte length label in GUI
+- **NEW:** Test samples with standalone logic test script
+
+### Verified
+- ✅ Auto-alignment: Flash < Base → 對齊到 Base
+- ✅ 256-byte boundary 對齊
+- ✅ 動態 Mask Byte 計算 (17 bits → 3 bytes for Max=0x2000)
+- ✅ Gap 檢測 (Gap #1, Gap #2)
+- ✅ HEX Gap 填補 0xFF
 
 ## [1.0.0] - 2026-03-27
 
@@ -33,4 +37,3 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/).
 - Single Map Viewer with gap detection
 - Full GUI interface (Tkinter)
 - CLI headless execution mode
-- Complete documentation (README, API docs, statistics)
