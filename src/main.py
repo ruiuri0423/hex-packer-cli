@@ -170,13 +170,21 @@ def validate_and_align_flash_address(item_addr, base_addr):
     was_adjusted = False
     alignment_warning = ""
     
+    # 確保輸入是整數
+    try:
+        item_addr = int(item_addr)
+        base_addr = int(base_addr)
+    except (ValueError, TypeError):
+        return base_addr, False, "Invalid address type"
+    
     # Rule 3: If flash address < base address, auto-align to base address
     if item_addr < base_addr:
         item_addr = base_addr
         was_adjusted = True
+        alignment_warning = f"Auto-aligned from below base to 0x{item_addr:04X}"
     
     # Rule 4: Ensure 256-byte alignment (Flash addresses must be in 256-byte blocks)
-    if item_addr % 256 != 0:
+    if item_addr > 0 and item_addr % 256 != 0:
         old_addr = item_addr
         item_addr = (item_addr // 256) * 256
         alignment_warning = f"Auto-aligned from 0x{old_addr:04X} to 0x{item_addr:04X} (256-byte boundary)"
@@ -196,11 +204,22 @@ def calculate_dynamic_mask_bytes(max_flash_addr, base_addr):
     
     Returns: (mask_byte_length, total_bits)
     """
+    # 確保輸入是整數
+    try:
+        max_flash_addr = int(max_flash_addr)
+        base_addr = int(base_addr)
+    except (ValueError, TypeError):
+        return 1, 0
+    
     if max_flash_addr <= base_addr:
         return 1, 0
     
     # Calculate how many 256-byte blocks from base to max address
-    total_bits = (max_flash_addr - base_addr) // 256 + 1  # +1 because Bit 0 = base_addr
+    offset = max_flash_addr - base_addr
+    if offset <= 0:
+        return 1, 0
+    
+    total_bits = (offset // 256) + 1  # +1 because Bit 0 = base_addr
     
     # Convert to bytes (each byte = 8 bits)
     mask_bytes = (total_bits + 7) // 8
@@ -264,25 +283,43 @@ def detect_flash_address_gaps(enabled_items, base_addr, max_addr):
     
     Returns: list of (gap_start, gap_end) tuples in absolute addresses
     """
+    # 確保所有輸入是整數
+    try:
+        base_addr = int(base_addr)
+        max_addr = int(max_addr)
+    except (ValueError, TypeError):
+        return []
+    
     if not enabled_items:
         return [(base_addr, max_addr + 255)]
     
     gaps = []
-    sorted_items = sorted(enabled_items, key=lambda x: x['addr'])
+    try:
+        sorted_items = sorted(enabled_items, key=lambda x: int(x['addr']))
+    except (ValueError, TypeError, KeyError):
+        return []
     
     # Check gap before first table
-    first_addr = sorted_items[0]['addr']
-    if first_addr > base_addr:
-        gaps.append((base_addr, first_addr - 256))
+    try:
+        first_addr = int(sorted_items[0]['addr'])
+        if first_addr > base_addr:
+            gaps.append((base_addr, first_addr - 256))
+    except (ValueError, TypeError, KeyError, IndexError):
+        pass
     
     # Check gaps between tables
     for i in range(len(sorted_items) - 1):
-        current_end = sorted_items[i]['addr'] + 256
-        next_start = sorted_items[i + 1]['addr']
+        try:
+            current_addr = int(sorted_items[i]['addr'])
+            next_addr = int(sorted_items[i + 1]['addr'])
+        except (ValueError, TypeError, KeyError):
+            continue
         
-        if next_start > current_end:
+        current_end = current_addr + 256
+        
+        if next_addr > current_end:
             # There's a gap between current table end and next table start
-            gaps.append((current_end, next_start - 256))
+            gaps.append((current_end, next_addr - 256))
     
     return gaps
 
@@ -1741,9 +1778,16 @@ class TestTabController:
     
     def add_test_table(self):
         """Add a new test table"""
-        default_name = f"Table_{len(self.test_table_tree.get_children()) + 1}"
-        default_addr = hex(len(self.test_table_tree.get_children()) * 256 + 0x1000)[2:].upper()
-        self.test_table_tree.insert("", "end", values=(default_name, default_addr, "Yes"))
+        try:
+            base_addr = int(self.ent_test_base.get(), 16)
+        except ValueError:
+            base_addr = 0x1000
+        
+        child_count = len(self.test_table_tree.get_children())
+        default_name = f"Table_{child_count + 1}"
+        default_addr = (child_count * 256 + base_addr)
+        default_addr_hex = f"{default_addr:04X}"
+        self.test_table_tree.insert("", "end", values=(default_name, default_addr_hex, "Yes"))
         self.update_status(f"Added: {default_name}")
     
     def remove_test_table(self):
@@ -1758,10 +1802,16 @@ class TestTabController:
         tables = []
         for item in self.test_table_tree.get_children():
             values = self.test_table_tree.item(item)["values"]
+            if len(values) < 3:
+                continue
             name, addr_str, enabled = values[0], values[1], values[2]
+            # 確保所有值都是字符串
+            name = str(name) if name else ""
+            addr_str = str(addr_str) if addr_str else "0"
+            enabled = str(enabled) if enabled else "No"
             try:
                 addr = int(addr_str, 16)
-            except ValueError:
+            except (ValueError, AttributeError):
                 addr = 0
             tables.append({
                 'name': name,
