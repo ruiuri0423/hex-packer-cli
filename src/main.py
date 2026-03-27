@@ -1415,55 +1415,70 @@ class AppGUI:
             mask_bytes = 1
             total_bits = 0
         
-        self.current_mask_val = mask
-        self.current_mask_bytes = mask_bytes  # NEW: Store byte length for GUI display
-        self.lbl_mask.config(text=f"Enable Mask: 0x{mask:0{mask_bytes*2}X} ({mask_bytes} byte(s))")
+        # Calculate mask based on ALL tables max address (not just enabled)
+        all_tables = self.integration_list
+        if all_tables:
+            max_addr = max([item['addr'] for item in all_tables])
+            mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
+        else:
+            mask_bytes, total_bits = 1, 0
+        
+        # Mask value only for enabled tables
+        enabled_items = [item for item in all_tables if item['enabled']]
+        if enabled_items:
+            mask_val, _, _ = calculate_enable_mask_with_gaps(enabled_items, base_addr)
+        else:
+            mask_val = 0
+        
+        self.current_mask_val = mask_val
+        self.current_mask_bytes = mask_bytes
+        self.lbl_mask.config(text=f"Enable Mask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} byte(s))")
         self.lbl_mask_bytes.config(text=f"Mask Bytes: {mask_bytes}")
         
         # Debug info for understanding the bit mapping
         self._debug_mask_mapping()
         
     def _debug_mask_mapping(self):
-        """Display detailed bit-to-address mapping for debugging with gap detection."""
+        """Display detailed bit-to-address mapping for ALL tables with gap detection."""
         # Get base address from UI
         try:
             base_addr = int(self.ent_base_addr.get().strip(), 16)
         except ValueError:
             base_addr = 0
-            
+        
         # Sort by address for mapping display
         sorted_list = sorted(self.integration_list, key=lambda x: x['addr'])
         
         debug_parts = []
-        gap_indicators = []
+        gap_count = 0
         last_end = base_addr
         
         for item in sorted_list:
             addr = item['addr']
             bit_pos = (addr - base_addr) // 256
-            name = item['name'][:8]  # Truncate name for display
+            name = item['name'][:10]  # Truncate name for display
             
             # Detect gap before this table
             if addr > last_end + 256:
                 gap_size = (addr - last_end) // 256
-                gap_indicators.append(f"Gap({gap_size})")
+                gap_count += 1
+                debug_parts.append(f"Gap{gap_count}({gap_size})")
             
-            if item['enabled'] and 0 <= bit_pos < 128:
-                debug_parts.append(f"B{bit_pos}:0x{addr:04X}")
+            if item['enabled']:
+                debug_parts.append(f"B{bit_pos}:{name[:6]}")
             else:
-                status = "ENABLED" if item['enabled'] else "DIS"
-                debug_parts.append(f"-:0x{addr:04X}")  # '-' means disabled or out of range
+                debug_parts.append(f"_:DIS")  # DIS = Disabled
             
             last_end = max(last_end, addr + 256)
         
+        # Show tables count and gaps info
+        enabled_count = sum(1 for item in sorted_list if item['enabled'])
+        disabled_count = len(sorted_list) - enabled_count
+        
         # Show gaps in debug
-        if gap_indicators:
-            gap_text = " | ".join(gap_indicators[:4])
-            if hasattr(self, 'lbl_mask_debug'):
-                self.lbl_mask_debug.config(text=f"Map: {debug_parts[:6]} | Gaps: {gap_text}")
-        else:
-            if hasattr(self, 'lbl_mask_debug'):
-                self.lbl_mask_debug.config(text=f"Map: {' | '.join(debug_parts[:8])}")
+        if hasattr(self, 'lbl_mask_debug'):
+            gap_info = f" | {gap_count} gaps" if gap_count > 0 else ""
+            self.lbl_mask_debug.config(text=f"Tables: {len(sorted_list)} ({enabled_count}E/{disabled_count}D){gap_info}")
         
         # Real-time GUI Sync: Update Mask in Packer Sections actively
         mask = self.current_mask_val
@@ -1482,6 +1497,8 @@ class AppGUI:
             bit_info = ""
             if item.get('bit_position', None) is not None and item['bit_position'] >= 0:
                 bit_info = f" [Bit{item['bit_position']}]"
+            elif not item['enabled']:
+                bit_info = " [DISABLED]"
             self.int_tree.insert("", "end", iid=str(idx), 
                 values=(item['name'], f"0x{item['addr']:04X}", "Yes" if item['enabled'] else "No", item['status'] + bit_info))
 
@@ -1508,12 +1525,17 @@ class AppGUI:
 
     def btn_int_generate(self):
         """Generate integrated HEX with new logic:
-        1. Validate and auto-align all addresses
-        2. Calculate dynamic mask bytes based on max address
-        3. Fill gaps with 0xFF
+        1. Validate and auto-align ALL loaded tables (not just enabled)
+        2. Calculate dynamic mask bytes based on ALL tables max address
+        3. Dump ALL tables to HEX (enabled and disabled)
+        4. Mask bits: enabled=1, disabled=0
+        5. Fill gaps with 0xFF
         """
-        enabled_items = [item for item in self.integration_list if item['enabled']]
-        if not enabled_items: messagebox.showwarning("Warning", "No tables are enabled!"); return
+        # 獲取所有 tables（不只是 enabled）
+        all_tables = self.integration_list
+        if not all_tables: 
+            messagebox.showwarning("Warning", "No tables loaded!"); 
+            return
         
         try: 
             base_addr = int(self.ent_base_addr.get().strip(), 16)
@@ -1521,9 +1543,9 @@ class AppGUI:
             messagebox.showerror("Error", "Invalid Global Base Address!"); 
             return
         
-        # NEW: Validate and auto-align all enabled items
+        # NEW: Validate and auto-align ALL items (enabled + disabled)
         alignment_log = []
-        for item in enabled_items:
+        for item in all_tables:
             old_addr = item['addr']
             item['addr'], was_adjusted, warning = validate_and_align_flash_address(item['addr'], base_addr)
             if was_adjusted:
@@ -1535,30 +1557,46 @@ class AppGUI:
                 log_text += f"\n... and {len(alignment_log) - 10} more"
             print(f"[Auto-Align] {len(alignment_log)} table(s) auto-aligned")
         
-        enabled_items.sort(key=lambda x: x['addr'])
+        # 根據 ALL tables 計算（不只是 enabled）
+        all_tables.sort(key=lambda x: x['addr'])
         
-        # NEW: Calculate dynamic mask bytes based on max address
-        max_addr = max([item['addr'] for item in enabled_items])
+        # 找出所有 tables 的最大位址
+        max_addr = max([item['addr'] for item in all_tables])
+        
+        # 計算 dynamic mask bytes
         mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
         
-        # Calculate total output size (includes gap padding)
+        # 計算總大小
         total_size = (max_addr - base_addr) + 256 
         
-        # NEW: Initialize buffer with 0xFF (gaps will be 0xFF)
+        # Initialize buffer with 0xFF (gaps will be 0xFF)
         integrated_buffer = bytearray([0xFF] * total_size) 
         
-        # NEW: Detect and report gaps
-        gaps = detect_flash_address_gaps(enabled_items, base_addr, max_addr)
-        gap_report = ""
-        if len(gaps) > 1:  # More than just the potential end gap
-            gap_report = f"\nGap areas detected: {len(gaps)} (filled with 0xFF)"
-        
-        # Fill in enabled tables (gaps remain as 0xFF)
+        # 放置 ALL tables 到 HEX（無論 enabled 與否）
         placement_log = []
-        for item in enabled_items:
+        enabled_count = 0
+        disabled_count = 0
+        
+        for item in all_tables:
             start = item['addr'] - base_addr
             integrated_buffer[start:start+256] = item['buffer']
-            placement_log.append(f"0x{item['addr']:04X}")
+            
+            if item['enabled']:
+                enabled_count += 1
+                placement_log.append(f"0x{item['addr']:04X}(E)")
+            else:
+                disabled_count += 1
+                placement_log.append(f"0x{item['addr']:04X}(D)")
+        
+        # 計算 mask（只有 enabled 的 tables 設為 1）
+        enabled_items = [item for item in all_tables if item['enabled']]
+        mask_val, _, _ = calculate_enable_mask_with_gaps(enabled_items, base_addr)
+        
+        # Detect gaps
+        gaps = detect_flash_address_gaps(all_tables, base_addr, max_addr)
+        gap_report = ""
+        if len(gaps) > 1:
+            gap_report = f"\nGap areas: {len(gaps)} (filled with 0xFF)"
         
         save_path = filedialog.asksaveasfilename(defaultextension=".hex", initialfile="All_Registers.hex", filetypes=[("HEX File", "*.hex")])
         if save_path:
@@ -1567,18 +1605,19 @@ class AppGUI:
                     for byte in integrated_buffer: f.write(f"{byte:02X}\n")
                 self.integrated_hex_path = save_path; self.btn_int_send.config(state=tk.NORMAL)
                 
-                # NEW: Enhanced success message
+                # Enhanced success message
                 success_msg = (
                     f"Integrated HEX saved to:\n{save_path}\n\n"
                     f"Base Address: 0x{base_addr:04X}\n"
                     f"Max Address: 0x{max_addr:04X}\n"
                     f"Total Size: {total_size} bytes\n"
-                    f"Enable Bits: {total_bits}\n"
-                    f"Mask Bytes: {mask_bytes}\n"
-                    f"Tables placed at: {', '.join(placement_log[:5])}"
+                    f"\nTables Summary:\n"
+                    f"  • Total loaded: {len(all_tables)}\n"
+                    f"  • Enabled: {enabled_count}\n"
+                    f"  • Disabled: {disabled_count}\n"
+                    f"\nMask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} bytes)\n"
+                    f"Enable Bits: {total_bits}"
                 )
-                if len(placement_log) > 5:
-                    success_msg += f"\n... and {len(placement_log) - 5} more"
                 if gap_report:
                     success_msg += gap_report
                     
