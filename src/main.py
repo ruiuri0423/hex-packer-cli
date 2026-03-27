@@ -5,6 +5,8 @@ import argparse
 import pandas as pd
 import tkinter as tk
 from tkinter import ttk, filedialog, messagebox
+import threading
+import time
 
 # =========================================================================
 # Shared Logic: Hex Parsing, M0 Intel HEX, and Parallel Hardware CRC16
@@ -836,17 +838,20 @@ class AppGUI:
         self.tab_m0 = ttk.Frame(self.notebook)
         self.tab_integrator = ttk.Frame(self.notebook)
         self.tab_viewer = ttk.Frame(self.notebook)
+        self.tab_test = ttk.Frame(self.notebook)
         
         self.notebook.add(self.tab_packer, text="1. Firmware Packer")
         self.notebook.add(self.tab_m0, text="2. M0 HEX Converter")
         self.notebook.add(self.tab_integrator, text="3. Register Integrator")
         self.notebook.add(self.tab_viewer, text="4. Single Map Viewer")
+        self.notebook.add(self.tab_test, text="5. Logic Test")
         self.notebook.pack(expand=1, fill="both")
 
         self.setup_packer_tab()
         self.setup_m0_tab()
         self.setup_integrator_tab()
         self.setup_viewer_tab()
+        self.setup_test_tab()
         
         self.notebook.select(self.tab_packer)
 
@@ -1616,6 +1621,10 @@ class AppGUI:
         detail_text = f"Name : {raw_data.get('name','')}\nAddr : {raw_data.get('high_addr','')} ~ {raw_data.get('low_addr','')}\nBits : {raw_data.get('bits','')} bit(s) [MSB: {raw_data.get('msb','')} | LSB: {raw_data.get('lsb','')}]\nInit : {raw_data.get('init','')}  |  R/W: {raw_data.get('rw','')}\n" + "-" * 60 + "\nDescription:\n" + str(raw_data.get('raw_desc','')) + "\n"
         self.txt_details.config(state=tk.NORMAL); self.txt_details.delete("1.0", tk.END); self.txt_details.insert(tk.END, detail_text); self.txt_details.config(state=tk.DISABLED)
 
+    def setup_test_tab(self):
+        """Setup Test Tab"""
+        self.test_controller = TestTabController(self.tab_test, self)
+    
     def btn_view_export_txt(self):
         if self.viewer.current_buffer is None: return
         default_name = self.combo_viewer_files.get().strip().replace('.xlsx', '').replace('.xls', '') + "_init.txt"
@@ -1626,6 +1635,428 @@ class AppGUI:
                     for byte in self.viewer.current_buffer: f.write(f"{byte:02X}\n")
                 messagebox.showinfo("Success", f"Table exported to:\n{save_path}")
             except Exception as e: messagebox.showerror("Error", str(e))
+
+
+
+# =========================================================================
+# Core 3: Test Tab - Logic Verification & Demo
+# =========================================================================
+class TestTabController:
+    """Controller for Test Tab functionality"""
+    
+    def __init__(self, parent_frame, app_ref):
+        self.parent = parent_frame
+        self.app = app_ref
+        self.test_results = []
+        self.setup_ui()
+    
+    def setup_ui(self):
+        """Setup Test Tab UI"""
+        # Title
+        title_frame = tk.Frame(self.parent)
+        title_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Label(title_frame, text="Tab3 Register Integrator Logic Test Suite", 
+                 font=("Arial", 14, "bold"), fg="#2c3e50").pack(side=tk.LEFT)
+        
+        # Test Scenario Frame
+        scenario_frame = tk.LabelFrame(self.parent, text=" Test Scenario Setup ", padx=15, pady=10)
+        scenario_frame.pack(fill=tk.X, padx=10, pady=5)
+        
+        # Base Address
+        tk.Label(scenario_frame, text="Base Address (Hex): 0x").pack(side=tk.LEFT, padx=5)
+        self.ent_test_base = tk.Entry(scenario_frame, width=10)
+        self.ent_test_base.insert(0, "1000")
+        self.ent_test_base.pack(side=tk.LEFT, padx=5)
+        
+        # Test Tables Section
+        tables_frame = tk.LabelFrame(self.parent, text=" Test Tables ", padx=10, pady=5)
+        tables_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Table for test tables
+        cols = ("Name", "Flash Address (Hex)", "Enabled")
+        self.test_table_tree = ttk.Treeview(tables_frame, columns=cols, show="headings", height=6)
+        for col in cols:
+            self.test_table_tree.heading(col, text=col)
+            self.test_table_tree.column(col, anchor="center")
+        scroll_y = ttk.Scrollbar(tables_frame, orient=tk.VERTICAL, command=self.test_table_tree.yview)
+        self.test_table_tree.configure(yscroll=scroll_y.set)
+        scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
+        self.test_table_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        
+        # Add/Remove buttons
+        btn_frame = tk.Frame(tables_frame)
+        btn_frame.pack(fill=tk.X, pady=5)
+        
+        tk.Button(btn_frame, text="+ Add Table", command=self.add_test_table, 
+                  bg="#27ae60", fg="white", width=12).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="- Remove Selected", command=self.remove_test_table, 
+                  bg="#e74c3c", fg="white", width=12).pack(side=tk.LEFT, padx=2)
+        tk.Button(btn_frame, text="Load Preset", command=self.load_preset, 
+                  bg="#3498db", fg="white", width=12).pack(side=tk.LEFT, padx=2)
+        
+        # Control Buttons
+        control_frame = tk.Frame(self.parent)
+        control_frame.pack(fill=tk.X, padx=10, pady=10)
+        
+        tk.Button(control_frame, text="▶ Run All Tests", command=self.run_all_tests,
+                  bg="#9b59b6", fg="white", font=("Arial", 11, "bold"), width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="🔄 Run Single Test", command=self.run_single_test,
+                  bg="#f39c12", fg="white", font=("Arial", 10), width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="📊 Show Mask Calc", command=self.show_mask_calc,
+                  bg="#16a085", fg="white", font=("Arial", 10), width=15).pack(side=tk.LEFT, padx=5)
+        tk.Button(control_frame, text="🧹 Clear Results", command=self.clear_results,
+                  bg="#95a5a6", fg="white", width=12).pack(side=tk.RIGHT, padx=5)
+        
+        # Results Frame
+        results_frame = tk.LabelFrame(self.parent, text=" Test Results ", padx=10, pady=5)
+        results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
+        
+        # Text widget for results
+        self.txt_results = tk.Text(results_frame, wrap=tk.WORD, bg="#1e1e1e", fg="#00ff00", 
+                                   font=("Courier", 10), insertbackground="white")
+        scroll_y_res = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.txt_results.yview)
+        self.txt_results.configure(yscroll=scroll_y_res.set)
+        scroll_y_res.pack(side=tk.RIGHT, fill=tk.Y)
+        self.txt_results.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
+        
+        # Status Bar
+        self.status_bar = tk.Label(self.parent, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
+        self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
+        
+        # Initialize with preset tables
+        self.load_preset()
+    
+    def load_preset(self):
+        """Load preset test tables"""
+        self.test_table_tree.delete()
+        preset_tables = [
+            ("Table_A", "1000", True),
+            ("Table_B", "1300", True),
+            ("Table_C", "2000", True),
+        ]
+        for name, addr, enabled in preset_tables:
+            self.test_table_tree.insert("", "end", values=(name, addr, "Yes" if enabled else "No"))
+        self.update_status("Preset loaded: 3 tables")
+    
+    def add_test_table(self):
+        """Add a new test table"""
+        default_name = f"Table_{len(self.test_table_tree.get_children()) + 1}"
+        default_addr = hex(len(self.test_table_tree.get_children()) * 256 + 0x1000)[2:].upper()
+        self.test_table_tree.insert("", "end", values=(default_name, default_addr, "Yes"))
+        self.update_status(f"Added: {default_name}")
+    
+    def remove_test_table(self):
+        """Remove selected test table"""
+        selected = self.test_table_tree.selection()
+        if selected:
+            self.test_table_tree.delete(selected)
+            self.update_status("Table removed")
+    
+    def get_test_tables(self):
+        """Get all test tables as list"""
+        tables = []
+        for item in self.test_table_tree.get_children():
+            values = self.test_table_tree.item(item)["values"]
+            name, addr_str, enabled = values[0], values[1], values[2]
+            try:
+                addr = int(addr_str, 16)
+            except ValueError:
+                addr = 0
+            tables.append({
+                'name': name,
+                'addr': addr,
+                'enabled': enabled.lower() == "yes"
+            })
+        return tables
+    
+    def update_status(self, msg):
+        """Update status bar"""
+        self.status_bar.config(text=f"Status: {msg}")
+        self.parent.update()
+    
+    def log(self, msg, color=None):
+        """Log message to results text"""
+        if color:
+            self.txt_results.tag_config(color, foreground=color)
+            self.txt_results.insert(tk.END, msg + "\n", color)
+        else:
+            self.txt_results.insert(tk.END, msg + "\n")
+        self.txt_results.see(tk.END)
+        self.parent.update()
+    
+    def run_all_tests(self):
+        """Run all tests in sequence"""
+        self.txt_results.delete("1.0", tk.END)
+        self.log("=" * 70)
+        self.log("       Tab3 Register Integrator Logic Test Suite", "#00FFFF")
+        self.log("=" * 70)
+        self.log("")
+        
+        tables = self.get_test_tables()
+        if not tables:
+            self.log("❌ No tables configured!", "#FF0000")
+            return
+        
+        try:
+            base_addr = int(self.ent_test_base.get(), 16)
+        except ValueError:
+            self.log("❌ Invalid Base Address!", "#FF0000")
+            return
+        
+        self.log(f"Base Address: 0x{base_addr:04X}")
+        self.log(f"Tables Count: {len(tables)}")
+        self.log("")
+        
+        # Test 1: Address Alignment
+        self.log("【TEST 1】Address Alignment & Validation", "#FFFF00")
+        self.log("-" * 40)
+        self.run_alignment_test(tables, base_addr)
+        self.log("")
+        
+        # Test 2: Mask Calculation
+        self.log("【TEST 2】Dynamic Mask Calculation", "#FFFF00")
+        self.log("-" * 40)
+        self.run_mask_test(tables, base_addr)
+        self.log("")
+        
+        # Test 3: Gap Detection
+        self.log("【TEST 3】Flash Address Gap Detection", "#FFFF00")
+        self.log("-" * 40)
+        self.run_gap_test(tables, base_addr)
+        self.log("")
+        
+        # Test 4: HEX Generation
+        self.log("【TEST 4】HEX Buffer Generation", "#FFFF00")
+        self.log("-" * 40)
+        self.run_hex_test(tables, base_addr)
+        self.log("")
+        
+        # Summary
+        self.log("=" * 70)
+        self.log("       Test Complete!", "#00FF00")
+        self.log("=" * 70)
+        self.update_status("All tests completed")
+    
+    def run_alignment_test(self, tables, base_addr):
+        """Run alignment test"""
+        self.log("Testing auto-alignment rules...")
+        self.log("")
+        
+        for table in tables:
+            old_addr = table['addr']
+            new_addr, adjusted, warning = validate_and_align_flash_address(old_addr, base_addr)
+            
+            if adjusted:
+                self.log(f"  ⚠️  {table['name']}: 0x{old_addr:04X} → 0x{new_addr:04X}", "#FFA500")
+                if warning:
+                    self.log(f"      {warning}", "#888888")
+            else:
+                self.log(f"  ✓ {table['name']}: 0x{new_addr:04X} (no change)", "#00FF00")
+        
+        self.log("")
+        self.log("✅ Test 1 Complete")
+    
+    def run_mask_test(self, tables, base_addr):
+        """Run mask calculation test"""
+        enabled_tables = [t for t in tables if t['enabled']]
+        
+        if not enabled_tables:
+            self.log("❌ No enabled tables!", "#FF0000")
+            return
+        
+        # Calculate
+        max_addr = max(t['addr'] for t in enabled_tables)
+        mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
+        mask_val, _, bit_mapping = calculate_enable_mask_with_gaps(enabled_tables, base_addr)
+        
+        self.log(f"Max Address: 0x{max_addr:04X}")
+        self.log(f"Total Bits: {total_bits}")
+        self.log(f"Mask Bytes: {mask_bytes}")
+        self.log(f"Enable Mask: 0x{mask_val:0{mask_bytes*2}X}")
+        self.log("")
+        self.log("Bit Mapping:")
+        
+        for m in bit_mapping:
+            gap_note = ""
+            # Check if there's a gap before this table
+            for i, t in enumerate(enabled_tables):
+                if t['addr'] == m['addr'] and i > 0:
+                    prev_addr = enabled_tables[i-1]['addr']
+                    if m['addr'] > prev_addr + 256:
+                        gap_blocks = (m['addr'] - prev_addr) // 256 - 1
+                        gap_note = f" ← Gap before! ({gap_blocks} blocks)"
+                    break
+            self.log(f"  Bit {m['bit_pos']:2d}: 0x{m['addr']:04X} - {m['name']}{gap_note}", "#00FFFF")
+        
+        self.log("")
+        self.log("✅ Test 2 Complete")
+    
+    def run_gap_test(self, tables, base_addr):
+        """Run gap detection test"""
+        enabled_tables = [t for t in tables if t['enabled']]
+        
+        if not enabled_tables:
+            self.log("❌ No enabled tables!", "#FF0000")
+            return
+        
+        max_addr = max(t['addr'] for t in enabled_tables)
+        gaps = detect_flash_address_gaps(enabled_tables, base_addr, max_addr)
+        
+        if len(gaps) <= 1:
+            self.log("✓ No gaps detected - continuous memory layout", "#00FF00")
+        else:
+            self.log(f"Found {len(gaps)} gap(s):")
+            for i, (start, end) in enumerate(gaps, 1):
+                blocks = (end - start) // 256 + 1
+                self.log(f"  Gap #{i}: 0x{start:04X} ~ 0x{end:04X} ({blocks} blocks) → Mask bit = 0", "#FFA500")
+                self.log(f"      Memory range: [{start - base_addr}] ~ [{end - base_addr}]")
+        
+        self.log("")
+        self.log("✅ Test 3 Complete")
+    
+    def run_hex_test(self, tables, base_addr):
+        """Run HEX buffer generation test"""
+        enabled_tables = [t for t in tables if t['enabled']]
+        
+        if not enabled_tables:
+            self.log("❌ No enabled tables!", "#FF0000")
+            return
+        
+        # Create mock buffer
+        def create_mock_buffer(name):
+            buf = bytearray([0xFF] * 256)
+            buf[0] = ord(name[0]) if name else 0xAA
+            buf[1] = ord(name[1]) if len(name) > 1 else 0xBB
+            buf[0xFE] = 0xAB
+            buf[0xFF] = 0xCD
+            return buf
+        
+        max_addr = max(t['addr'] for t in enabled_tables)
+        total_size = (max_addr - base_addr) + 256
+        
+        # Initialize with 0xFF (gap padding)
+        buffer = bytearray([0xFF] * total_size)
+        
+        self.log(f"Buffer Size: {total_size} bytes")
+        self.log(f"Initialized with: 0xFF (Gap padding)")
+        self.log("")
+        self.log("Placing tables:")
+        
+        for t in enabled_tables:
+            start = t['addr'] - base_addr
+            buffer[start:start+256] = create_mock_buffer(t['name'])
+            self.log(f"  ✓ {t['name']}: 0x{t['addr']:04X} → Buffer[{start}:{start+256}]", "#00FF00")
+        
+        # Verify gaps
+        self.log("")
+        self.log("Verifying gaps are 0xFF:")
+        enabled_addrs = [(t['addr'], t['addr'] + 256) for t in enabled_tables]
+        
+        all_gaps_ff = True
+        for t in enabled_tables:
+            for other_start, other_end in enabled_addrs:
+                if t['addr'] == other_start:
+                    continue
+                # Check gap before this table
+                prev_end = other_end
+                if t['addr'] > prev_end:
+                    gap_start = t['addr'] - base_addr
+                    prev_end_abs = prev_end - base_addr
+                    gap_data = buffer[prev_end_abs:gap_start]
+                    all_ff = all(b == 0xFF for b in gap_data)
+                    if not all_ff:
+                        all_gaps_ff = False
+        
+        if all_gaps_ff:
+            self.log("  ✓ All gaps filled with 0xFF", "#00FF00")
+        else:
+            self.log("  ⚠️ Some gaps not filled with 0xFF", "#FFA500")
+        
+        self.log("")
+        self.log("✅ Test 4 Complete")
+    
+    def run_single_test(self):
+        """Run single quick test"""
+        self.txt_results.delete("1.0", tk.END)
+        self.log("【Quick Single Test】")
+        self.log("-" * 40)
+        
+        tables = self.get_test_tables()
+        try:
+            base_addr = int(self.ent_test_base.get(), 16)
+        except ValueError:
+            self.log("❌ Invalid Base Address!", "#FF0000")
+            return
+        
+        enabled_tables = [t for t in tables if t['enabled']]
+        if not enabled_tables:
+            self.log("❌ No enabled tables!", "#FF0000")
+            return
+        
+        max_addr = max(t['addr'] for t in enabled_tables)
+        mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
+        mask_val, _, bit_mapping = calculate_enable_mask_with_gaps(enabled_tables, base_addr)
+        
+        self.log(f"Base: 0x{base_addr:04X} | Max: 0x{max_addr:04X}")
+        self.log(f"Mask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} bytes, {total_bits} bits)")
+        self.log("")
+        for m in bit_mapping:
+            self.log(f"  Bit {m['bit_pos']:2d}: 0x{m['addr']:04X} - {m['name']}", "#00FFFF")
+    
+    def show_mask_calc(self):
+        """Show detailed mask calculation"""
+        self.txt_results.delete("1.0", tk.END)
+        self.log("【Mask Calculation Details】", "#FFFF00")
+        self.log("=" * 50)
+        
+        tables = self.get_test_tables()
+        try:
+            base_addr = int(self.ent_test_base.get(), 16)
+        except ValueError:
+            self.log("❌ Invalid Base Address!", "#FF0000")
+            return
+        
+        enabled_tables = [t for t in tables if t['enabled']]
+        if not enabled_tables:
+            self.log("❌ No enabled tables!", "#FF0000")
+            return
+        
+        self.log(f"Formula:")
+        self.log(f"  Bit_Position = (Flash_Addr - Base_Addr) // 256")
+        self.log(f"  Mask_Bytes = (Total_Bits + 7) // 8")
+        self.log("")
+        
+        max_addr = max(t['addr'] for t in enabled_tables)
+        mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
+        
+        self.log(f"Calculation:")
+        self.log(f"  Base = 0x{base_addr:04X}")
+        self.log(f"  Max = 0x{max_addr:04X}")
+        self.log(f"  Offset = Max - Base = 0x{max_addr - base_addr:04X} ({max_addr - base_addr} bytes)")
+        self.log(f"  Total_Bits = Offset / 256 + 1 = {total_bits}")
+        self.log(f"  Mask_Bytes = ({total_bits} + 7) // 8 = {mask_bytes}")
+        self.log("")
+        
+        mask_val = 0
+        for t in enabled_tables:
+            bit_pos = (t['addr'] - base_addr) // 256
+            offset = t['addr'] - base_addr
+            mask_val |= (1 << bit_pos)
+            self.log(f"  {t['name']}:")
+            self.log(f"    Addr = 0x{t['addr']:04X}")
+            self.log(f"    Offset = 0x{offset:04X} ({offset} bytes)")
+            self.log(f"    Bit = {offset} // 256 = {bit_pos}")
+            self.log(f"    Mask |= (1 << {bit_pos})")
+            self.log("")
+        
+        self.log(f"Final Mask: 0x{mask_val:0{mask_bytes*2}X}")
+    
+    def clear_results(self):
+        """Clear results"""
+        self.txt_results.delete("1.0", tk.END)
+        self.update_status("Results cleared")
+
 
 # =========================================================================
 # Execution Entry Point (CLI & GUI Routing)

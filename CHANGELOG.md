@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.0] - 2026-03-27
+
+### Added
+- **NEW: Tab 5 - Logic Test Tab**
+  - Test Scenario Setup (Base Address, Tables)
+  - Address Alignment Test (auto-alignment verification)
+  - Dynamic Mask Calculation Test
+  - Gap Detection Test
+  - HEX Buffer Generation Test
+  - Preset loading (3-table scenario)
+  - Quick single test mode
+  - Detailed mask calculation view
+  - Visual test results with color-coded output
+
+### GUI Enhancements
+- Added `TestTabController` class for test management
+- Added `setup_test_tab()` method to AppGUI
+- Tab 5 "Logic Test" with full test suite
+- Color-coded terminal-style results display
+
+### Test Features
+- Run All Tests (4 test suites)
+- Run Single Test (quick verification)
+- Show Mask Calc (detailed calculation)
+- Add/Remove/Load Preset tables
+- Real-time status bar
+
 ## [1.1.0] - 2026-03-27
 
 ### Changed
@@ -17,14 +44,6 @@
 - `calculate_enable_mask_with_gaps()` - Gap-aware mask calculation
 - `detect_flash_address_gaps()` - Gap detection for HEX generation
 - Mask byte length label in GUI
-- **NEW:** Test samples with standalone logic test script
-
-### Verified
-- ✅ Auto-alignment: Flash < Base → 對齊到 Base
-- ✅ 256-byte boundary 對齊
-- ✅ 動態 Mask Byte 計算 (17 bits → 3 bytes for Max=0x2000)
-- ✅ Gap 檢測 (Gap #1, Gap #2)
-- ✅ HEX Gap 填補 0xFF
 
 ## [1.0.0] - 2026-03-27
 
