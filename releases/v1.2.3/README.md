@@ -1,80 +1,83 @@
-# hex-packer-cli Release
+# Hex Packer CLI v1.2.3
 
-## Version: 1.2.3
+## 📦 下載說明
 
-## Contents
+### Linux 執行檔 (推薦)
 
-| File | Description |
-|------|-------------|
-| `bin/hex-packer-cli` | Linux x86_64 CLI binary (standalone, self-contained) |
-| `hex-packer-cli-1.2.3-src.tar.gz` | Source code archive |
-
-## Requirements
-
-- Linux x86_64
-- No Python required (binary is self-contained with all dependencies)
-
-## Installation
+下載 `hex-packer-cli/` 資料夾並執行：
 
 ```bash
-# Extract (if needed)
+chmod +x hex-packer-cli/hex-packer-cli
+./hex-packer-cli/hex-packer-cli --help
+```
+
+### 原始碼
+
+下載 `hex-packer-cli-1.2.3-src.tar.gz` 並解壓縮：
+
+```bash
 tar -xzf hex-packer-cli-1.2.3-src.tar.gz
-
-# Make binary executable
-chmod +x bin/hex-packer-cli
-
-# Run CLI mode
-./bin/hex-packer-cli --cli --config config.csv --output firmware.hex
-```
-
-## Usage
-
-### Binary (Pre-built)
-```bash
-# CLI mode (headless)
-./bin/hex-packer-cli --cli --config config.csv --output firmware.hex
-
-# Full pipeline with M0 and Register Integration
-./bin/hex-packer-cli \
-  --cli \
-  --config "packer_config.csv" \
-  --output "firmware.hex" \
-  --m0_in "M0_firmware.hex" \
-  --m0_out "M0_expanded.hex" \
-  --reg_csv "integrator_config.csv" \
-  --reg_base "0000" \
-  --reg_out "all_registers.hex"
-```
-
-### Source Code (requires Python 3.x)
-```bash
-# Install dependencies
-pip install pandas openpyxl
-
-# Run CLI mode
-python3 src/main.py --cli --config config.csv --output firmware.hex
-
-# Run GUI mode
+cd hex-packer-cli-1.2.3
+pip install -r requirements.txt
 python3 src/main.py
 ```
 
-## CLI Parameters
+## 🔧 版本資訊
 
-| Parameter | Required | Description |
-|-----------|----------|-------------|
-| `--cli` | Yes | Enable CLI headless mode |
-| `--config` | Yes (CLI) | Packer CSV config file |
-| `--output` | No | Output HEX file (default: all_crc.hex) |
-| `--m0_in` | No | M0 HEX input file |
-| `--m0_out` | No | M0 HEX output file |
-| `--reg_csv` | No | Integrator CSV config |
-| `--reg_base` | No | Global Base Address (Hex, default: 0000) |
-| `--reg_out` | No | Integrated Register HEX output |
+- **版本**: 1.2.3
+- **建置日期**: 2026-03-30
+- **目標平台**: linux-x86_64
+- **建置類型**: Static (靜態連結)
 
-## Verification
+## ✨ 新功能
 
-Verify checksums:
-```bash
-sha256sum -c bin/hex-packer-cli.sha256
-sha256sum -c hex-packer-cli-1.2.3-src.tar.gz.sha256
+本次更新包含靜態編譯版本，解決跨系統相容性問題：
+- ✅ 靜態連結所有 Python 標準函式庫
+- ✅ 內嵌所有必要依賴（pandas, openpyxl）
+- ✅ 無需安裝 Python 環境即可執行
+- ✅ 支援大多數 Linux 發行版
+
+## 📋 SHA256 校驗碼
+
 ```
+Binary:  c81a16b1d0b64f067cf126435980fdb707e0c0d5364fefa45211f4f25ded0ccd
+Source:  ef68999c244cb65a0e0beded359d9cdf64f8f579c91e62a6695030b3dfa36b1a
+```
+
+## 📖 使用方式
+
+### GUI 模式（預設）
+```bash
+./hex-packer-cli --gui
+```
+
+### CLI 模式
+```bash
+# 打包固件
+./hex-packer-cli --cli --config config.csv --output firmware.hex
+
+# 轉換 M0 HEX
+./hex-packer-cli --cli --m0_in firmware.hex --m0_out m0_output.hex
+
+# 整合暫存器表格
+./hex-packer-cli --cli --reg_csv registers.csv --reg_base 0000 --reg_out registers.hex
+```
+
+## 📁 目錄結構
+
+```
+hex-packer-cli/
+├── hex-packer-cli      # 主執行檔
+├── _internal/          # 依賴函式庫
+├── VERSION             # 版本資訊
+└── README.md           # 本說明檔
+```
+
+## ⚠️ 注意事項
+
+1. **Tkinter GUI**: 需要系統已安裝 Tkinter (`apt install python3-tk`)
+2. **執行權限**: 請確保 `hex-packer-cli` 具有執行權限
+3. **心血漏洞**: 若在安全性要求高的環境使用，請注意 Python 版本的已知漏洞
+
+---
+Built with PyInstaller | https://github.com/ruiuri0423/hex-packer-cli
