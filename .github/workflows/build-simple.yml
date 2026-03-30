@@ -1,0 +1,55 @@
+name: Build
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version'
+        required: true
+        default: '1.2.5'
+        type: string
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+      
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      
+      - name: Install deps
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller pandas openpyxl
+      
+      - name: Build
+        run: |
+          pyinstaller src/main.py --name hex-packer-cli --onefile --console
+          chmod +x dist/hex-packer-cli
+      
+      - name: Test
+        run: |
+          ./dist/hex-packer-cli --help
+      
+      - name: Package
+        run: |
+          cp dist/hex-packer-cli ./hex-packer-cli
+          tar -czf hex-packer-cli-${{ github.event.inputs.version || '1.2.5' }}.tar.gz hex-packer-cli
+          sha256sum hex-packer-cli-${{ github.event.inputs.version || '1.2.5' }}.tar.gz
+      
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: hex-packer-cli-*.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
