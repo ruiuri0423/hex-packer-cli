@@ -1,0 +1,246 @@
+name: Build - CentOS 7 Compatible
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version tag'
+        required: true
+        default: '1.2.3'
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    container: centos:7
+    
+    steps:
+      - name: Install EPEL and Development Tools
+        run: |
+          yum -y install epel-release
+          yum -y groupinstall "Development Tools"
+          yum -y install python3 python3-pip wget
+      
+      - name: Install Python 3.11 (CentOS 7 default is 3.6)
+        run: |
+          # Install Python 3.11 from IUS
+          yum -y install https://repo.ius.io/ius-release-el7.rpm
+          yum -y install python311 python311-pip python311-devel
+          alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+          alternatives --install /usr/bin/pip3 pip3 /usr/bin/pip3.11 1
+      
+      - name: Set Python 3.11 as default
+        run: |
+          ln -sf /usr/bin/python3.11 /usr/bin/python3
+          ln -sf /usr/bin/pip3.11 /usr/bin/pip3
+          python3 --version
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install dependencies
+        run: |
+          pip3 install --upgrade pip
+          pip3 install pyinstaller pandas openpyxl
+      
+      - name: Create PyInstaller spec
+        run: |
+          cat > hex_packer.spec << 'SPEC'
+# -*- mode: python ; coding: utf-8 -*-
+
+block_cipher = None
+
+a = Analysis(
+    ['src/main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('src/core', 'core')],
+    hiddenimports=[
+        'pandas', 'openpyxl', 'tkinter', 'threading',
+        'core.crc16', 'core.hex_parser', 'core.mask_calculator',
+        'core.packer', 'core.register', 'core.viewer',
+    ],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    win_no_prefer_redirects=False,
+    win_private_assemblies=False,
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz, a.scripts, [],
+    exclude_binaries=True,
+    name='hex-packer-cli',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+)
+
+coll = COLLECT(
+    exe, a.binaries, a.zipfiles, a.datas,
+    strip=False, upx=False, upx_exclude=[],
+    name='hex-packer-cli',
+)
+SPEC
+      
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller hex_packer.spec --clean
+          chmod +x dist/hex-packer-cli/hex-packer-cli
+      
+      - name: Test binary
+        run: |
+          ./dist/hex-packer-cli/hex-packer-cli --help | head -10
+      
+      - name: Package release
+        run: |
+          cd dist
+          tar -czf hex-packer-cli-centos7.tar.gz hex-packer-cli/
+          sha256sum hex-packer-cli-centos7.tar.gz > hex-packer-cli-centos7.tar.gz.sha256
+          echo "SHA256: $(cat hex-packer-cli-centos7.tar.gz.sha256)"
+      
+      - name: Create Source Package
+        run: |
+          git archive --format=tar.gz --prefix=hex-packer-cli-${{ github.event.inputs.version || '1.2.3' }}/ HEAD > src.tar.gz
+          sha256sum src.tar.gz > src.tar.gz.sha256
+      
+      - name: Upload Release Assets
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+          VERSION: \${{ github.event.inputs.version || '1.2.3' }}
+        run: |
+          # Get release ID
+          RELEASE_ID=\$(curl -s -H "Authorization: token \$GITHUB_TOKEN" \
+            https://api.github.com/repos/\${{ github.repository }}/releases/tags/v\$VERSION | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          
+          # Upload binary
+          curl -s -X POST \
+            -H "Authorization: token \$GITHUB_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @dist/hex-packer-cli-centos7.tar.gz \
+            "https://uploads.github.com/repos/\${{ github.repository }}/releases/\$RELEASE_ID/assets?name=hex-packer-cli-centos7.tar.gz"
+          
+          # Upload source
+          curl -s -X POST \
+            -H "Authorization: token \$GITHUB_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @src.tar.gz \
+            "https://uploads.github.com/repos/\${{ github.repository }}/releases/\$RELEASE_ID/assets?name=hex-packer-cli-\$VERSION-src.tar.gz"
+      
+      - name: Upload to Release Artifact
+        uses: actions/upload-release-asset@v1
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        with:
+          upload_url: \${{ env.upload_url }}
+          asset_path: dist/hex-packer-cli-centos7.tar.gz
+          asset_name: hex-packer-cli-centos7.tar.gz
+          asset_content_type: application/gzip
+
+      - name: Create GitHub Release
+        if: github.event_name == 'workflow_dispatch'
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v\${{ github.event.inputs.version || '1.2.3' }}
+          files: |
+            dist/hex-packer-cli-centos7.tar.gz
+            src.tar.gz
+          body: |
+            ## CentOS 7 兼容版本
+            
+            ### 支援環境
+            - CentOS 7 (GLIBC 2.17)
+            - RHEL 7
+            - Amazon Linux 2
+            
+            ### SHA256
+            \`\`\`
+            \$(cat dist/hex-packer-cli-centos7.tar.gz.sha256)
+            \`\`\`
+            
+            ### 使用方式
+            ```bash
+            tar -xzf hex-packer-cli-centos7.tar.gz
+            cd hex-packer-cli
+            chmod +x hex-packer-cli
+            ./hex-packer-cli --help
+            ```
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+
+  # Alternative: Build with Nuitka for maximum compatibility
+  build-nuitka:
+    runs-on: ubuntu-latest
+    container: centos:7
+    
+    steps:
+      - name: Install EPEL and Development Tools
+        run: |
+          yum -y install epel-release
+          yum -y groupinstall "Development Tools"
+          yum -y install python3 python3-pip wget
+      
+      - name: Install Python 3.11
+        run: |
+          yum -y install https://repo.ius.io/ius-release-el7.rpm
+          yum -y install python311 python311-pip python311-devel
+          alternatives --install /usr/bin/python3 python3 /usr/bin/python3.11 1
+          alternatives --install /usr/bin/pip3 pip3 /usr/bin/pip3.11 1
+          ln -sf /usr/bin/python3.11 /usr/bin/python3
+          ln -sf /usr/bin/pip3.11 /usr/bin/pip3
+      
+      - name: Checkout code
+        uses: actions/checkout@v4
+      
+      - name: Install Nuitka
+        run: |
+          pip3 install nuitka pandas openpyxl
+          pip3 install ordered-set zstandard
+          # Static linking
+          pip3 install relocate-python
+
+      - name: Build with Nuitka
+        run: |
+          cd src
+          python3 -m nuitka \
+            --standalone \
+            --onefile \
+            --linux-icon=none \
+            --enable-plugin=tkinter \
+            --include-data-dir=../src/core=core \
+            --remove-output \
+            --output-filename=hex-packer-cli \
+            main.py
+          cd ..
+          cp src/hex-packer-cli dist/ 2>/dev/null || ls -la src/*.bin 2>/dev/null || ls -la src/*.dist 2>/dev/null || find src -name "hex-packer-cli" -type f
+
+      - name: Package Nuitka binary
+        run: |
+          mkdir -p nuitka-output
+          find . -name "hex-packer-cli" -type f -exec cp {} nuitka-output/ \;
+          tar -czf hex-packer-cli-nuitka-centos7.tar.gz nuitka-output/
+          sha256sum hex-packer-cli-nuitka-centos7.tar.gz
+
+      - name: Upload Nuitka binary
+        if: github.event_name == 'workflow_dispatch'
+        env:
+          GITHUB_TOKEN: \${{ secrets.GITHUB_TOKEN }}
+        run: |
+          RELEASE_ID=\$(curl -s -H "Authorization: token \$GITHUB_TOKEN" \
+            https://api.github.com/repos/\${{ github.repository }}/releases/tags/v\${{ github.event.inputs.version || '1.2.3' }} | \
+            python3 -c "import sys,json; print(json.load(sys.stdin)['id'])")
+          
+          curl -s -X POST \
+            -H "Authorization: token \$GITHUB_TOKEN" \
+            -H "Content-Type: application/gzip" \
+            --data-binary @hex-packer-cli-nuitka-centos7.tar.gz \
+            "https://uploads.github.com/repos/\${{ github.repository }}/releases/\$RELEASE_ID/assets?name=hex-packer-cli-nuitka-centos7.tar.gz"
