@@ -1,0 +1,168 @@
+name: Build Binary
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version'
+        required: true
+        default: '1.2.4'
+        type: string
+  push:
+    tags:
+      - 'v*'
+
+jobs:
+  build:
+    runs-on: ubuntu-20.04
+    timeout-minutes: 30
+    
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.9'
+      
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install pyinstaller==6.11.1 pandas openpyxl
+          pip list | grep -E "pyinstaller|pandas|openpyxl"
+      
+      - name: Get version
+        id: version
+        run: |
+          VERSION="${{ github.event.inputs.version || '1.2.4' }}"
+          echo "version=$VERSION" >> $GITHUB_OUTPUT
+      
+      - name: Create PyInstaller spec
+        run: |
+          cat > hex_packer.spec << 'SPEC'
+block_cipher = None
+
+a = Analysis(
+    ['src/main.py'],
+    pathex=[],
+    binaries=[],
+    datas=[('src/core', 'core')],
+    hiddenimports=[
+        'pandas', 'openpyxl', 'tkinter', 'threading',
+        'core.crc16', 'core.hex_parser', 'core.mask_calculator',
+        'core.packer', 'core.register', 'core.viewer',
+    ],
+    hookspath=[],
+    runtime_hooks=[],
+    excludes=[],
+    cipher=block_cipher,
+    noarchive=False,
+)
+
+pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
+
+exe = EXE(
+    pyz, a.scripts, [],
+    exclude_binaries=True,
+    name='hex-packer-cli',
+    debug=False,
+    bootloader_ignore_signals=False,
+    strip=False,
+    upx=False,
+    console=True,
+)
+
+coll = COLLECT(
+    exe, a.binaries, a.zipfiles, a.datas,
+    strip=False, upx=False,
+    name='hex-packer-cli',
+)
+SPEC
+      
+      - name: Build with PyInstaller
+        run: |
+          pyinstaller hex_packer.spec --clean 2>&1 | tail -20
+          chmod +x dist/hex-packer-cli/hex-packer-cli
+      
+      - name: List build output
+        run: |
+          ls -la dist/hex-packer-cli/
+          ls -la dist/hex-packer-cli/_internal/ 2>/dev/null | head -20 || echo "No _internal"
+      
+      - name: Check GLIBC version in binary
+        run: |
+          strings dist/hex-packer-cli/hex-packer-cli | grep -E "GLIBC_2\." | sort -u | tail -5
+      
+      - name: Test binary
+        run: |
+          ./dist/hex-packer-cli/hex-packer-cli --help 2>&1 | head -15 || echo "Binary test completed"
+      
+      - name: Package binary
+        run: |
+          cd dist
+          tar -czf hex-packer-cli-ubuntu20.tar.gz hex-packer-cli/
+          sha256sum hex-packer-cli-ubuntu20.tar.gz > hex-packer-cli-ubuntu20.tar.gz.sha256
+          cd ..
+          cp dist/hex-packer-cli-ubuntu20.tar.gz ./hex-packer-cli-ubuntu20.tar.gz
+          cp dist/hex-packer-cli-ubuntu20.tar.gz.sha256 ./
+      
+      - name: Create Source Package
+        run: |
+          git archive --format=tar.gz --prefix=hex-packer-cli-${{ steps.version.outputs.version }}/ HEAD > hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz
+          sha256sum hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz > hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz.sha256
+      
+      - name: Upload Artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: hex-packer-binary-${{ steps.version.outputs.version }}
+          path: |
+            hex-packer-cli-ubuntu20.tar.gz
+            hex-packer-cli-ubuntu20.tar.gz.sha256
+            hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz
+            hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz.sha256
+          retention-days: 30
+      
+      - name: Create Release
+        if: github.event_name == 'workflow_dispatch' || startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: v${{ steps.version.outputs.version }}
+          name: v${{ steps.version.outputs.version }} - Linux Binary
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          files: |
+            hex-packer-cli-ubuntu20.tar.gz
+            hex-packer-cli-ubuntu20.tar.gz.sha256
+            hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz
+            hex-packer-cli-${{ steps.version.outputs.version }}-src.tar.gz.sha256
+          body: |
+            ## v${{ steps.version.outputs.version }} - Linux Binary (Ubuntu 20.04 編譯)
+
+            ### 編譯環境
+            - OS: Ubuntu 20.04
+            - Python: 3.9
+            - PyInstaller: 6.11.1
+            
+            ### GLIBC 需求
+            - Ubuntu 20.04: GLIBC 2.31
+            - CentOS 7: GLIBC 2.17 (❌ 不相容)
+            - CentOS 8+: GLIBC 2.17+ (✅ 相容)
+
+            ### SHA256
+            ```
+            $(cat hex-packer-cli-ubuntu20.tar.gz.sha256)
+            ```
+
+            ### 使用方式
+            ```bash
+            tar -xzf hex-packer-cli-ubuntu20.tar.gz
+            cd hex-packer-cli
+            chmod +x hex-packer-cli
+            ./hex-packer-cli --help
+            ```
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
