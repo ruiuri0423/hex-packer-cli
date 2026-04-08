@@ -78,33 +78,6 @@ jobs:
           path: dist/hex-packer-cli
           retention-days: 7
 
-  gui-test:
-    runs-on: ubuntu-20.04
-    # GUI testing requires display, skip in CI
-    if: false
-    steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
-
-      - name: Set up Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: '3.8'
-
-      - name: Install dependencies
-        run: |
-          pip install --upgrade pip
-          pip install pandas openpyxl
-
-      - name: Install xvfb for headless GUI
-        run: |
-          apt-get update
-          apt-get install -y xvfb
-
-      - name: Test GUI import
-        run: |
-          xvfb-run python -c "import tkinter; print('Tkinter OK')"
-
   integration-test:
     runs-on: ubuntu-20.04
     needs: test
