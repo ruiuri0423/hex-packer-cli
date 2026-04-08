@@ -170,7 +170,7 @@ def validate_and_align_flash_address(item_addr, base_addr):
     was_adjusted = False
     alignment_warning = ""
     
-    # 確保輸入是整數
+    # Ensure input is integer
     try:
         item_addr = int(item_addr)
         base_addr = int(base_addr)
@@ -204,7 +204,7 @@ def calculate_dynamic_mask_bytes(max_flash_addr, base_addr):
     
     Returns: (mask_byte_length, total_bits)
     """
-    # 確保輸入是整數
+    # Ensure input is integer
     try:
         max_flash_addr = int(max_flash_addr)
         base_addr = int(base_addr)
@@ -283,7 +283,7 @@ def detect_flash_address_gaps(enabled_items, base_addr, max_addr):
     
     Returns: list of (gap_start, gap_end) tuples in absolute addresses
     """
-    # 確保所有輸入是整數
+    # Ensure all input is integer
     try:
         base_addr = int(base_addr)
         max_addr = int(max_addr)
@@ -325,130 +325,211 @@ def detect_flash_address_gaps(enabled_items, base_addr, max_addr):
 
 
 # =========================================================================
+# Core: Integrated HEX Generator (Shared by CLI & GUI)
+# =========================================================================
+
+def generate_integrated_hex(tables, base_addr, output_path=None, include_disabled=True):
+    """
+    Core integrated HEX generation logic - shared by CLI and GUI.
+    
+    This function handles:
+    1. Address validation and auto-alignment for ALL tables
+    2. Dynamic mask byte calculation based on ALL tables max address
+    3. Buffer initialization with 0xFF (gap areas)
+    4. Placement of ALL tables (enabled + disabled) into buffer
+    5. Enable mask calculation (only enabled tables set bit=1)
+    
+    Args:
+        tables: list of dicts with keys: {name, path, addr, enabled, buffer}
+        base_addr: Global base address (integer)
+        output_path: Output HEX file path (None = return buffer only)
+        include_disabled: If True, place ALL tables in HEX; if False, only enabled
+    
+    Returns:
+        (success, buffer, mask_val, mask_bytes, total_size, enabled_count, disabled_count, alignment_log, gap_count)
+        - success: bool
+        - buffer: bytearray or None
+        - mask_val: integer enable mask value
+        - mask_bytes: integer number of mask bytes needed
+        - total_size: integer total buffer size
+        - enabled_count: integer count of enabled tables
+        - disabled_count: integer count of disabled tables
+        - alignment_log: list of adjustment info strings
+        - gap_count: integer number of gaps detected
+    """
+    if not tables:
+        return False, None, 0, 1, 0, 0, 0, [], 0
+    
+    # === Step 1: Validate and auto-align ALL addresses ===
+    alignment_log = []
+    for item in tables:
+        old_addr = item['addr']
+        item['addr'], was_adjusted, warning = validate_and_align_flash_address(item['addr'], base_addr)
+        if was_adjusted:
+            alignment_log.append({
+                'name': item['name'],
+                'old': old_addr,
+                'new': item['addr'],
+                'warning': warning
+            })
+    
+    # === Step 2: Sort by Flash Address ===
+    tables.sort(key=lambda x: x['addr'])
+    
+    # === Step 3: Calculate dynamic mask bytes based on ALL tables ===
+    all_tables = tables
+    if all_tables:
+        max_addr = max([item['addr'] for item in all_tables])
+        mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
+    else:
+        max_addr = base_addr
+        mask_bytes, total_bits = 1, 0
+    
+    # === Step 4: Calculate enable mask (only enabled tables) ===
+    enabled_items = [item for item in tables if item['enabled']]
+    if enabled_items:
+        mask_val, _, _ = calculate_enable_mask_with_gaps(enabled_items, base_addr)
+    else:
+        mask_val = 0
+    
+    # === Step 5: Calculate total buffer size ===
+    total_size = (max_addr - base_addr) + 256
+    
+    # === Step 6: Initialize buffer with 0xFF (gap padding) ===
+    integrated_buffer = bytearray([0xFF] * total_size)
+    
+    # === Step 7: Place tables (enabled + disabled by default) ===
+    enabled_count = 0
+    disabled_count = 0
+    last_end = base_addr
+    gap_count = 0
+    
+    for item in tables:
+        addr = item['addr']
+        
+        # Count gaps
+        if addr > last_end + 256:
+            gap_count += 1
+        
+        if item['enabled']:
+            enabled_count += 1
+        else:
+            disabled_count += 1
+        
+        # Load buffer if not already loaded
+        if 'buffer' not in item or not item.get('buffer'):
+            if item.get('path'):
+                success, buf = parse_register_excel_to_buffer(item['path'])
+                if success:
+                    item['buffer'] = buf
+        
+        # Place buffer into integrated buffer
+        if item.get('buffer'):
+            start = item['addr'] - base_addr
+            end_pos = start + 256
+            if end_pos <= len(integrated_buffer):
+                integrated_buffer[start:end_pos] = item['buffer']
+        
+        last_end = max(last_end, addr + 256)
+    
+    # === Step 8: Write output if path provided ===
+    if output_path:
+        with open(output_path, 'w') as f:
+            for byte in integrated_buffer:
+                f.write(f"{byte:02X}\n")
+    
+    return (True, integrated_buffer, mask_val, mask_bytes, total_size, 
+            enabled_count, disabled_count, alignment_log, gap_count)
+
+
+# =========================================================================
 # CLI Headless Execution Functions
 # =========================================================================
 def generate_integrated_hex_from_csv(csv_path, base_addr_hex_str, out_path):
-    """CLI Worker: Parses CSV, generates the integrated hex map, and calculates dynamic Enable Mask.
+    """CLI Worker: Parses CSV and generates integrated hex using shared core logic.
     
-    NEW Mask Calculation Logic (Enhanced):
-    1. Get global base address
-    2. Compare min Flash Address with global base address
-    3. If flash_address < base_address: auto-align to base_address
-    4. Flash addresses must be 256-byte aligned
-    5. Calculate enable mask bytes based on MAX flash address - base_address
-       - Total length = max_flash_addr - base_addr (in bits, converted to bytes)
-       - Gap areas in flash address = corresponding mask bit = 0
-    6. Gap areas filled with 0xFF padding in HEX output
+    This function now uses generate_integrated_hex() for consistent behavior with GUI.
+    All tables (enabled + disabled) are placed in the HEX output.
+    Only enabled tables contribute to the enable mask calculation.
     """
     print(f"[*] Parsing Integrator Config: {csv_path}")
+    
     try:
         df = pd.read_csv(csv_path).fillna("")
         base_addr = int(base_addr_hex_str, 16)
-        all_items = []  # All items (enabled + disabled) for mask calculation
-        enabled_items = []  # Only enabled items for output
         base_dir = os.path.dirname(csv_path)
-
-        # First pass: collect all items with their properties
+        
+        # Build tables list from CSV
+        all_items = []
         for _, row in df.iterrows():
             addr = int(str(row.get("Address_Hex", "0")).replace("0x", ""), 16)
             is_enabled = str(row.get("Enabled", "Yes")).strip().lower() in ["yes", "true", "1", "y"]
             rel_path = str(row.get("Relative_Path", ""))
             name = str(row.get("Name", ""))
-            all_items.append({
-                'addr': addr, 
-                'enabled': is_enabled, 
-                'rel_path': rel_path, 
-                'name': name
-            })
-
-        # Sort by Flash Address
-        all_items.sort(key=lambda x: x['addr'])
-        
-        # NEW: Validate and auto-align all addresses
-        print(f"[*] Global Base Address: 0x{base_addr:04X}")
-        print(f"[*] Validating and auto-aligning Flash Addresses...")
-        
-        for item in all_items:
-            old_addr = item['addr']
-            item['addr'], was_adjusted, warning = validate_and_align_flash_address(item['addr'], base_addr)
-            if was_adjusted:
-                print(f"    [A] {item['name'][:25]:25s}: 0x{old_addr:04X} -> 0x{item['addr']:04X}")
-                if warning:
-                    print(f"        {warning}")
-        
-        # NEW: Calculate dynamic mask with proper byte length based on max address
-        enabled_addr_list = [item for item in all_items if item['enabled']]
-        
-        if enabled_addr_list:
-            max_addr = max(item['addr'] for item in enabled_addr_list)
-            mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
             
-            print(f"[*] Max Flash Address: 0x{max_addr:04X}")
-            print(f"[*] Total Enable Bits needed: {total_bits}")
-            print(f"[*] Mask Byte Length: {mask_bytes} byte(s)")
+            full_path = os.path.normpath(os.path.join(base_dir, rel_path)) if rel_path else ""
             
-            # Calculate mask value (gaps automatically = 0)
-            dynamic_mask = 0
-            for item in enabled_addr_list:
-                bit_position = (item['addr'] - base_addr) // 256
-                if 0 <= bit_position < 128:  # Support up to 128 bits (16 bytes)
-                    dynamic_mask |= (1 << bit_position)
-            
-            print(f"[*] Enable Mask (Hex): 0x{dynamic_mask:0{mask_bytes*2}X}")
-        else:
-            dynamic_mask = 0
-            mask_bytes = 1
-            total_bits = 0
-            print(f"[*] No enabled tables - Mask: 0x0000")
-        
-        # Debug: Print bit-to-address mapping
-        print(f"\n[*] Bit-to-Address Mapping (Base 0x{base_addr:04X} + Bit*N*256):")
-        gap_count = 0
-        last_end = base_addr
-        for item in all_items:
-            if item['enabled']:
-                bit_pos = (item['addr'] - base_addr) // 256
-                # Detect gap
-                if item['addr'] > last_end + 256:
-                    gap_count += 1
-                    gap_size = (item['addr'] - last_end) // 256
-                    print(f"    [GAP #{gap_count}] 0x{last_end:04X} - 0x{item['addr']-256:04X} ({gap_size} blocks = Mask bits = 0)")
-                print(f"    ├── Bit {bit_pos:2d}: 0x{item['addr']:04X} - {item['name'][:20]}")
-                last_end = item['addr'] + 256
-        
-        # Second pass: collect enabled items with buffers
-        for item in all_items:
-            if item['enabled']:
-                if not item['rel_path']: continue
-                full_path = os.path.normpath(os.path.join(base_dir, item['rel_path']))
+            # Pre-load buffer if file exists
+            buffer = None
+            if full_path and os.path.exists(full_path):
                 success, buf = parse_register_excel_to_buffer(full_path)
-                if success: 
-                    enabled_items.append({'addr': item['addr'], 'buffer': buf, 'name': item['name']})
-                else: 
-                    print(f"[-] Error parsing {full_path}"); return False, 0
-
-        if not enabled_items: print("[-] No enabled tables found."); return False, 0
-
-        # NEW: Calculate total output size with proper gap handling
-        max_addr = max([item['addr'] for item in enabled_items])
-        total_size = (max_addr - base_addr) + 256
-        integrated_buffer = bytearray([0xFF] * total_size)
-        
-        print(f"\n[*] Generating Integrated HEX (Size: {total_size} bytes)...")
-        print(f"[*] Gap areas will be filled with 0xFF padding")
-
-        # Fill in enabled tables (gaps remain as 0xFF padding - already initialized)
-        for item in enabled_items:
-            start = item['addr'] - base_addr
-            integrated_buffer[start:start+256] = item['buffer']
-            print(f"    ├── Placed {item['name'][:20]:20s} at 0x{item['addr']:04X}")
-
-        with open(out_path, 'w') as f:
-            for byte in integrated_buffer: f.write(f"{byte:02X}\n")
+                if success:
+                    buffer = buf
             
+            all_items.append({
+                'name': name,
+                'path': full_path,
+                'addr': addr,
+                'enabled': is_enabled,
+                'buffer': buffer
+            })
+        
+        # Call shared core function (include_disabled=True for GUI behavior alignment)
+        (success, buffer, mask_val, mask_bytes, total_size, 
+         enabled_count, disabled_count, alignment_log, gap_count) = generate_integrated_hex(
+            tables=all_items,
+            base_addr=base_addr,
+            output_path=out_path,
+            include_disabled=True  # Align with GUI: place ALL tables in HEX
+        )
+        
+        if not success:
+            print("[-] Failed to generate integrated HEX")
+            return False, 0
+        
+        # === Print detailed log ===
+        print(f"[*] Global Base Address: 0x{base_addr:04X}")
+        print(f"[*] Max Flash Address: 0x{base_addr + total_size - 256:04X}")
+        print(f"[*] Total Size: {total_size} bytes")
+        print(f"[*] Enable Mask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} byte(s))")
+        
+        # Print alignment adjustments
+        if alignment_log:
+            print(f"[*] Auto-aligned {len(alignment_log)} table(s):")
+            for adj in alignment_log:
+                print(f"    [A] {adj['name'][:25]:25s}: 0x{adj['old']:04X} -> 0x{adj['new']:04X}")
+        
+        # Print bit-to-address mapping
+        print(f"\n[*] Bit-to-Address Mapping (Base 0x{base_addr:04X} + Bit*N*256):")
+        sorted_tables = sorted([t for t in all_items if t['enabled']], key=lambda x: x['addr'])
+        last_end = base_addr
+        for item in sorted_tables:
+            bit_pos = (item['addr'] - base_addr) // 256
+            if item['addr'] > last_end + 256:
+                gap_size = (item['addr'] - last_end) // 256
+                print(f"    [GAP] 0x{last_end:04X} - 0x{item['addr']-256:04X} ({gap_size} blocks = Mask bits = 0)")
+            print(f"    ├── Bit {bit_pos:2d}: 0x{item['addr']:04X} - {item['name'][:20]}")
+            last_end = item['addr'] + 256
+        
+        # Print placement summary
+        print(f"\n[*] Tables Placement Summary:")
+        print(f"    ├── Total: {len(all_items)}")
+        print(f"    ├── Enabled: {enabled_count}")
+        print(f"    ├── Disabled: {disabled_count}")
+        print(f"    └── Gaps: {gap_count}")
+        
         print(f"\n[+] Integrator Generated successfully: {out_path}")
-        print(f"[+] Total Output Size: {total_size} bytes (includes gap padding)")
-        return True, dynamic_mask
+        return True, mask_val
         
     except Exception as e:
         print(f"[-] Integrator Error: {e}")
@@ -866,6 +947,8 @@ class AppGUI:
         self.packer_csv_path = ""
         self.editing_idx = None 
         self.current_mask_val = 0 
+        self.current_mask_bytes = 1
+        self.current_gap_count = 0
         
         # Shared Dictionary for Tab 3 & 4 Sync
         self.shared_files = {}
@@ -901,12 +984,12 @@ class AppGUI:
         
         btn_frame1 = tk.Frame(ctrl_frame)
         btn_frame1.pack(side=tk.LEFT, fill=tk.Y)
-        tk.Button(btn_frame1, text="📂 Load Config (.csv)", command=self.btn_packer_load_config, bg="#ffc107", width=18).grid(row=0, column=0, padx=2, pady=2)
-        tk.Button(btn_frame1, text="💾 Save Config (.csv)", command=self.btn_packer_save_config, bg="#20c997", fg="white", width=18).grid(row=0, column=1, padx=2, pady=2)
+        tk.Button(btn_frame1, text="Load Config (.csv)", command=self.btn_packer_load_config, bg="#ffc107", width=18).grid(row=0, column=0, padx=2, pady=2)
+        tk.Button(btn_frame1, text="Save Config (.csv)", command=self.btn_packer_save_config, bg="#20c997", fg="white", width=18).grid(row=0, column=1, padx=2, pady=2)
 
         btn_frame2 = tk.Frame(ctrl_frame)
         btn_frame2.pack(side=tk.RIGHT, fill=tk.Y)
-        tk.Button(btn_frame2, text="✏ Edit Selected", command=self.btn_packer_edit, bg="#007bff", fg="white", width=15).grid(row=0, column=0, padx=2, pady=2)
+        tk.Button(btn_frame2, text="Edit Selected", command=self.btn_packer_edit, bg="#007bff", fg="white", width=15).grid(row=0, column=0, padx=2, pady=2)
         tk.Button(btn_frame2, text="- Remove Selected", command=self.btn_packer_remove, bg="#dc3545", fg="white", width=15).grid(row=0, column=1, padx=2, pady=2)
         tk.Button(btn_frame2, text="Clear List", command=self.clear_packer_list, bg="#6c757d", fg="white", width=15).grid(row=0, column=2, padx=2, pady=2)
 
@@ -981,7 +1064,7 @@ class AppGUI:
         f_actions.grid(row=5, column=3, sticky="e", padx=5, pady=10)
         self.btn_manual_add = tk.Button(f_actions, text="+ Add Section", command=self.btn_manual_add_section, bg="#17a2b8", fg="white", font=("Arial", 10, "bold"), width=15)
         self.btn_manual_add.pack(side=tk.LEFT, padx=5)
-        self.btn_manual_update = tk.Button(f_actions, text="✔ Update Section", command=self.btn_manual_update_section, bg="#ffc107", font=("Arial", 10, "bold"), width=15, state=tk.DISABLED)
+        self.btn_manual_update = tk.Button(f_actions, text="Update Section", command=self.btn_manual_update_section, bg="#ffc107", font=("Arial", 10, "bold"), width=15, state=tk.DISABLED)
         self.btn_manual_update.pack(side=tk.LEFT, padx=5)
 
         tree_frame = tk.Frame(self.tab_packer, padx=10, pady=5)
@@ -998,11 +1081,11 @@ class AppGUI:
 
         order_frame = tk.Frame(self.tab_packer, padx=10, pady=10)
         order_frame.pack(fill=tk.X)
-        tk.Button(order_frame, text="▲ Move Up", command=self.move_up).pack(side=tk.LEFT, padx=5)
-        tk.Button(order_frame, text="▼ Move Down", command=self.move_down).pack(side=tk.LEFT, padx=5)
+        tk.Button(order_frame, text="Move Up", command=self.move_up).pack(side=tk.LEFT, padx=5)
+        tk.Button(order_frame, text="Move Down", command=self.move_down).pack(side=tk.LEFT, padx=5)
         
         tk.Button(order_frame, text="Generate Final HEX File", command=self.generate_firmware, bg="#28a745", fg="white", font=("Arial", 12, "bold")).pack(side=tk.RIGHT, padx=5)
-        tk.Button(order_frame, text="📋 Copy CLI Command", command=self.btn_copy_cli_command, bg="#000000", fg="#00ff00", font=("Courier", 11, "bold")).pack(side=tk.RIGHT, padx=15)
+        tk.Button(order_frame, text="Copy CLI Command", command=self.btn_copy_cli_command, bg="#000000", fg="#00ff00", font=("Courier", 11, "bold")).pack(side=tk.RIGHT, padx=15)
 
     def refresh_packer_tree(self):
         self.packer.calculate_addresses()
@@ -1175,7 +1258,7 @@ class AppGUI:
         tk.Button(frame, text="1. Load M0 HEX File", command=self.btn_m0_load, bg="#007bff", fg="white", font=("Arial", 11, "bold"), width=30).pack(pady=10)
         self.lbl_m0_status = tk.Label(frame, text="File Status: No file loaded.", fg="gray", font=("Courier", 11)); self.lbl_m0_status.pack(pady=5)
         tk.Button(frame, text="2. Convert & Expand length (+2 Bytes for CRC)", command=self.btn_m0_convert, bg="#6f42c1", fg="white", font=("Arial", 11, "bold"), width=40).pack(pady=15)
-        self.btn_m0_send = tk.Button(frame, text="3. Send to Firmware Packer ➡", command=self.btn_m0_send_packer, bg="#17a2b8", fg="white", font=("Arial", 11, "bold"), width=30, state=tk.DISABLED)
+        self.btn_m0_send = tk.Button(frame, text="3. Send to Firmware Packer", command=self.btn_m0_send_packer, bg="#17a2b8", fg="white", font=("Arial", 11, "bold"), width=30, state=tk.DISABLED)
         self.btn_m0_send.pack(pady=10)
 
         self.m0_file_path = ""; self.m0_output_path = ""; self.m0_buffer = bytearray(); self.m0_orig_size = 0
@@ -1234,22 +1317,20 @@ class AppGUI:
         tk.Button(row0, text="+ Add Excel File(s)", command=self.btn_int_add_files, bg="#007bff", fg="white", width=20).pack(side=tk.LEFT, padx=2)
         tk.Button(row0, text="- Remove Selected", command=self.btn_int_remove, bg="#dc3545", fg="white", width=20).pack(side=tk.LEFT, padx=2)
         row1 = tk.Frame(btn_frame); row1.pack(fill=tk.X, pady=2)
-        tk.Button(row1, text="📂 Load Config (.csv)", command=self.btn_int_load_config, bg="#ffc107", width=20).pack(side=tk.LEFT, padx=2)
-        tk.Button(row1, text="💾 Save Config (.csv)", command=self.btn_int_save_config, bg="#20c997", fg="white", width=20).pack(side=tk.LEFT, padx=2)
+        tk.Button(row1, text="Load Config (.csv)", command=self.btn_int_load_config, bg="#ffc107", width=20).pack(side=tk.LEFT, padx=2)
+        tk.Button(row1, text="Save Config (.csv)", command=self.btn_int_save_config, bg="#20c997", fg="white", width=20).pack(side=tk.LEFT, padx=2)
 
         self.lbl_mask = tk.Label(load_frame, text="Enable Mask: 0x0000 (1 byte)", fg="#d35400", font=("Courier", 14, "bold"))
         self.lbl_mask.pack(side=tk.RIGHT, padx=15)
         
-        # NEW: Label for mask byte length
         self.lbl_mask_bytes = tk.Label(load_frame, text="Mask Bytes: 1", fg="#27ae60", font=("Courier", 10, "bold"))
         self.lbl_mask_bytes.pack(side=tk.RIGHT, padx=15)
         
-        # Debug label for bit mapping visualization
         self.lbl_mask_debug = tk.Label(load_frame, text="Bit Mapping: ", fg="#666666", font=("Courier", 9))
         self.lbl_mask_debug.pack(side=tk.RIGHT, padx=15)
 
         tree_frame = tk.Frame(self.tab_integrator, padx=10, pady=5); tree_frame.pack(fill=tk.BOTH, expand=True)
-        tk.Label(tree_frame, text="💡 Tip: Double-click any row to view its complete Memory Map in Tab 4.", fg="gray").pack(anchor="w")
+        tk.Label(tree_frame, text="Tip: Double-click any row to view its complete Memory Map in Tab 4.", fg="gray").pack(anchor="w")
 
         columns = ("Name", "Flash Address (Hex)", "Enabled", "Status")
         self.int_tree = ttk.Treeview(tree_frame, columns=columns, show="headings", selectmode="browse")
@@ -1285,7 +1366,7 @@ class AppGUI:
         btn_action_frame = tk.Frame(action_frame)
         btn_action_frame.pack(fill=tk.X, padx=5, pady=5)
         tk.Button(btn_action_frame, text="1. Generate Integrated HEX", command=self.btn_int_generate, bg="#6f42c1", fg="white", font=("Arial", 11, "bold")).pack(side=tk.LEFT, padx=5)
-        self.btn_int_send = tk.Button(btn_action_frame, text="2. Send to Firmware Packer ➡", command=self.btn_int_send_packer, bg="#17a2b8", fg="white", font=("Arial", 11, "bold"), state=tk.DISABLED)
+        self.btn_int_send = tk.Button(btn_action_frame, text="2. Send to Firmware Packer", command=self.btn_int_send_packer, bg="#17a2b8", fg="white", font=("Arial", 11, "bold"), state=tk.DISABLED)
         self.btn_int_send.pack(side=tk.LEFT, padx=15)
 
     def btn_int_add_files(self):
@@ -1304,12 +1385,12 @@ class AppGUI:
             success, buffer = parse_register_excel_to_buffer(f)
             status = "Parsed + CRC" if success else "Error Parsing"
             
-            # NEW: Default address starts at base_addr (auto-aligned)
+            # Default address starts at base_addr (auto-aligned)
             initial_addr = base_addr
             self.integration_list.append({
                 "name": name, 
                 "path": f, 
-                "addr": initial_addr,  # Start at base address
+                "addr": initial_addr,
                 "enabled": True, 
                 "buffer": buffer, 
                 "status": status,
@@ -1373,49 +1454,12 @@ class AppGUI:
         except ValueError:
             base_addr = 0
         
-        # NEW: Validate and auto-align all addresses on refresh
-        adjustments = []
+        # Validate and auto-align all addresses
         for item in self.integration_list:
             old_addr = item['addr']
             item['addr'], was_adjusted, warning = validate_and_align_flash_address(item['addr'], base_addr)
-            if was_adjusted:
-                adjustments.append({
-                    'name': item['name'],
-                    'old': old_addr,
-                    'new': item['addr'],
-                    'warning': warning
-                })
         
-        # Show adjustment dialog if any addresses were auto-aligned
-        if adjustments:
-            adj_text = "\n".join([f"• {a['name']}: 0x{a['old']:04X} → 0x{a['new']:04X}" + (f"\n  {a['warning']}" if a['warning'] else "") for a in adjustments])
-            # Only show first 5 adjustments to avoid long dialogs
-            if len(adjustments) > 5:
-                adj_text += f"\n... and {len(adjustments) - 5} more auto-alignments"
-            print(f"[Auto-Align] {len(adjustments)} table(s) auto-aligned to base address")
-        
-        # Build mask based on ADDRESS GAP from Base with dynamic byte length
-        enabled_items = [item for item in self.integration_list if item['enabled']]
-        
-        if enabled_items:
-            max_addr = max(item['addr'] for item in enabled_items)
-            mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
-            
-            # Calculate mask value (gaps automatically = 0)
-            mask = 0
-            for item in enabled_items:
-                bit_position = (item['addr'] - base_addr) // 256
-                if 0 <= bit_position < 128:  # Support up to 128 bits
-                    mask |= (1 << bit_position)
-                    item['bit_position'] = bit_position
-                else:
-                    item['bit_position'] = -1
-        else:
-            mask = 0
-            mask_bytes = 1
-            total_bits = 0
-        
-        # Calculate mask based on ALL tables max address (not just enabled)
+        # Build mask based on ALL tables with dynamic byte length
         all_tables = self.integration_list
         if all_tables:
             max_addr = max([item['addr'] for item in all_tables])
@@ -1435,63 +1479,48 @@ class AppGUI:
         self.lbl_mask.config(text=f"Enable Mask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} byte(s))")
         self.lbl_mask_bytes.config(text=f"Mask Bytes: {mask_bytes}")
         
-        # Debug info for understanding the bit mapping
+        # Update debug info
         self._debug_mask_mapping()
         
     def _debug_mask_mapping(self):
         """Display detailed bit-to-address mapping for ALL tables with gap detection."""
-        # Get base address from UI
         try:
             base_addr = int(self.ent_base_addr.get().strip(), 16)
         except ValueError:
             base_addr = 0
         
-        # Sort by address for mapping display
         sorted_list = sorted(self.integration_list, key=lambda x: x['addr'])
         
-        debug_parts = []
         gap_count = 0
         last_end = base_addr
         
         for item in sorted_list:
             addr = item['addr']
-            bit_pos = (addr - base_addr) // 256
-            name = item['name'][:10]  # Truncate name for display
-            
-            # Detect gap before this table
             if addr > last_end + 256:
-                gap_size = (addr - last_end) // 256
                 gap_count += 1
-                debug_parts.append(f"Gap{gap_count}({gap_size})")
-            
-            if item['enabled']:
-                debug_parts.append(f"B{bit_pos}:{name[:6]}")
-            else:
-                debug_parts.append(f"_:DIS")  # DIS = Disabled
-            
             last_end = max(last_end, addr + 256)
         
-        # Show tables count and gaps info
         enabled_count = sum(1 for item in sorted_list if item['enabled'])
         disabled_count = len(sorted_list) - enabled_count
         
-        # Show gaps in debug
         if hasattr(self, 'lbl_mask_debug'):
             gap_info = f" | {gap_count} gaps" if gap_count > 0 else ""
             self.lbl_mask_debug.config(text=f"Tables: {len(sorted_list)} ({enabled_count}E/{disabled_count}D){gap_info}")
+            self.lbl_mask_debug.pack(side=tk.RIGHT, padx=15)
         
-        # Real-time GUI Sync: Update Mask in Packer Sections actively
+        # Real-time GUI Sync: Update Mask in Packer Sections
         mask = self.current_mask_val
         for sec in self.packer.sections:
             if sec.get('mask_target', '').strip() != '':
                 sec['mask_val'] = mask
                 
-        # If user is currently editing a section in Tab 1, update the form
+        # Update form if editing
         if self.editing_idx is not None and self.packer.sections[self.editing_idx].get('mask_target', '').strip() != '':
             self.ent_sec_mask_val.delete(0, tk.END)
             byte_len = getattr(self, 'current_mask_bytes', 1)
             self.ent_sec_mask_val.insert(0, f"{mask:0{byte_len*2}X}")
         
+        # Update treeview
         for item in self.int_tree.get_children(): self.int_tree.delete(item)
         for idx, item in enumerate(self.integration_list):
             bit_info = ""
@@ -1524,105 +1553,69 @@ class AppGUI:
         self.refresh_int_tree()
 
     def btn_int_generate(self):
-        """Generate integrated HEX with new logic:
-        1. Validate and auto-align ALL loaded tables (not just enabled)
-        2. Calculate dynamic mask bytes based on ALL tables max address
-        3. Dump ALL tables to HEX (enabled and disabled)
-        4. Mask bits: enabled=1, disabled=0
-        5. Fill gaps with 0xFF
+        """Generate integrated HEX using shared core logic.
+        
+        All tables (enabled + disabled) are placed in HEX output.
+        Only enabled tables contribute to enable mask calculation.
+        Gaps are filled with 0xFF padding.
         """
-        # 獲取所有 tables（不只是 enabled）
         all_tables = self.integration_list
         if not all_tables: 
-            messagebox.showwarning("Warning", "No tables loaded!"); 
+            messagebox.showwarning("Warning", "No tables loaded!")
             return
         
         try: 
             base_addr = int(self.ent_base_addr.get().strip(), 16)
         except ValueError: 
-            messagebox.showerror("Error", "Invalid Global Base Address!"); 
+            messagebox.showerror("Error", "Invalid Global Base Address!")
             return
         
-        # NEW: Validate and auto-align ALL items (enabled + disabled)
-        alignment_log = []
-        for item in all_tables:
-            old_addr = item['addr']
-            item['addr'], was_adjusted, warning = validate_and_align_flash_address(item['addr'], base_addr)
-            if was_adjusted:
-                alignment_log.append(f"• {item['name']}: 0x{old_addr:04X} → 0x{item['addr']:04X}")
+        save_path = filedialog.asksaveasfilename(
+            defaultextension=".hex", 
+            initialfile="All_Registers.hex", 
+            filetypes=[("HEX File", "*.hex")]
+        )
         
-        if alignment_log:
-            log_text = "\n".join(alignment_log[:10])
-            if len(alignment_log) > 10:
-                log_text += f"\n... and {len(alignment_log) - 10} more"
-            print(f"[Auto-Align] {len(alignment_log)} table(s) auto-aligned")
-        
-        # 根據 ALL tables 計算（不只是 enabled）
-        all_tables.sort(key=lambda x: x['addr'])
-        
-        # 找出所有 tables 的最大位址
-        max_addr = max([item['addr'] for item in all_tables])
-        
-        # 計算 dynamic mask bytes
-        mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
-        
-        # 計算總大小
-        total_size = (max_addr - base_addr) + 256 
-        
-        # Initialize buffer with 0xFF (gaps will be 0xFF)
-        integrated_buffer = bytearray([0xFF] * total_size) 
-        
-        # 放置 ALL tables 到 HEX（無論 enabled 與否）
-        placement_log = []
-        enabled_count = 0
-        disabled_count = 0
-        
-        for item in all_tables:
-            start = item['addr'] - base_addr
-            integrated_buffer[start:start+256] = item['buffer']
-            
-            if item['enabled']:
-                enabled_count += 1
-                placement_log.append(f"0x{item['addr']:04X}(E)")
-            else:
-                disabled_count += 1
-                placement_log.append(f"0x{item['addr']:04X}(D)")
-        
-        # 計算 mask（只有 enabled 的 tables 設為 1）
-        enabled_items = [item for item in all_tables if item['enabled']]
-        mask_val, _, _ = calculate_enable_mask_with_gaps(enabled_items, base_addr)
-        
-        # Detect gaps
-        gaps = detect_flash_address_gaps(all_tables, base_addr, max_addr)
-        gap_report = ""
-        if len(gaps) > 1:
-            gap_report = f"\nGap areas: {len(gaps)} (filled with 0xFF)"
-        
-        save_path = filedialog.asksaveasfilename(defaultextension=".hex", initialfile="All_Registers.hex", filetypes=[("HEX File", "*.hex")])
         if save_path:
-            try:
-                with open(save_path, 'w') as f:
-                    for byte in integrated_buffer: f.write(f"{byte:02X}\n")
-                self.integrated_hex_path = save_path; self.btn_int_send.config(state=tk.NORMAL)
+            # Call shared core function
+            (success, buffer, mask_val, mask_bytes, total_size, 
+             enabled_count, disabled_count, alignment_log, gap_count) = generate_integrated_hex(
+                tables=all_tables,
+                base_addr=base_addr,
+                output_path=save_path,
+                include_disabled=True  # Place ALL tables in HEX (align with GUI behavior)
+            )
+            
+            if success:
+                self.integrated_hex_path = save_path
+                self.btn_int_send.config(state=tk.NORMAL)
+                self.current_mask_val = mask_val
+                self.current_mask_bytes = mask_bytes
+                self.current_gap_count = gap_count
                 
-                # Enhanced success message
+                # Calculate max_addr for reporting
+                max_addr = base_addr + total_size - 256
+                
+                # Build success message
+                gap_report = f"\nGap areas: {gap_count} (filled with 0xFF)" if gap_count > 0 else ""
+                
                 success_msg = (
                     f"Integrated HEX saved to:\n{save_path}\n\n"
                     f"Base Address: 0x{base_addr:04X}\n"
                     f"Max Address: 0x{max_addr:04X}\n"
                     f"Total Size: {total_size} bytes\n"
                     f"\nTables Summary:\n"
-                    f"  • Total loaded: {len(all_tables)}\n"
-                    f"  • Enabled: {enabled_count}\n"
-                    f"  • Disabled: {disabled_count}\n"
-                    f"\nMask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} bytes)\n"
-                    f"Enable Bits: {total_bits}"
+                    f"  * Total loaded: {len(all_tables)}\n"
+                    f"  * Enabled: {enabled_count}\n"
+                    f"  * Disabled: {disabled_count}\n"
+                    f"\nMask: 0x{mask_val:0{mask_bytes*2}X} ({mask_bytes} bytes)"
                 )
                 if gap_report:
                     success_msg += gap_report
                     
                 messagebox.showinfo("Success", success_msg)
-            except Exception as e: messagebox.showerror("Error", str(e))
+            else:
+                messagebox.showerror("Error", "Failed to generate integrated HEX")
 
     def btn_int_send_packer(self):
         if not self.integrated_hex_path: return
@@ -1631,7 +1624,6 @@ class AppGUI:
         mask_target = self.ent_int_mask_target.get().strip()
         mask_offset = self.ent_int_mask_off.get().strip()
         
-        # Pass safe hex string representation
         mask_offset_str = mask_offset.replace('0x', '')
         try: mask_off_int = int(mask_offset_str, 16) if mask_offset_str else ""
         except ValueError: mask_off_int = ""
@@ -1728,28 +1720,23 @@ class TestTabController:
     
     def setup_ui(self):
         """Setup Test Tab UI"""
-        # Title
         title_frame = tk.Frame(self.parent)
         title_frame.pack(fill=tk.X, padx=10, pady=10)
         
         tk.Label(title_frame, text="Tab3 Register Integrator Logic Test Suite", 
                  font=("Arial", 14, "bold"), fg="#2c3e50").pack(side=tk.LEFT)
         
-        # Test Scenario Frame
         scenario_frame = tk.LabelFrame(self.parent, text=" Test Scenario Setup ", padx=15, pady=10)
         scenario_frame.pack(fill=tk.X, padx=10, pady=5)
         
-        # Base Address
         tk.Label(scenario_frame, text="Base Address (Hex): 0x").pack(side=tk.LEFT, padx=5)
         self.ent_test_base = tk.Entry(scenario_frame, width=10)
         self.ent_test_base.insert(0, "1000")
         self.ent_test_base.pack(side=tk.LEFT, padx=5)
         
-        # Test Tables Section
         tables_frame = tk.LabelFrame(self.parent, text=" Test Tables ", padx=10, pady=5)
         tables_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Table for test tables
         cols = ("Name", "Flash Address (Hex)", "Enabled")
         self.test_table_tree = ttk.Treeview(tables_frame, columns=cols, show="headings", height=6)
         for col in cols:
@@ -1760,7 +1747,6 @@ class TestTabController:
         scroll_y.pack(side=tk.RIGHT, fill=tk.Y)
         self.test_table_tree.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         
-        # Add/Remove buttons
         btn_frame = tk.Frame(tables_frame)
         btn_frame.pack(fill=tk.X, pady=5)
         
@@ -1771,24 +1757,21 @@ class TestTabController:
         tk.Button(btn_frame, text="Load Preset", command=self.load_preset, 
                   bg="#3498db", fg="white", width=12).pack(side=tk.LEFT, padx=2)
         
-        # Control Buttons
         control_frame = tk.Frame(self.parent)
         control_frame.pack(fill=tk.X, padx=10, pady=10)
         
-        tk.Button(control_frame, text="▶ Run All Tests", command=self.run_all_tests,
+        tk.Button(control_frame, text="Run All Tests", command=self.run_all_tests,
                   bg="#9b59b6", fg="white", font=("Arial", 11, "bold"), width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(control_frame, text="🔄 Run Single Test", command=self.run_single_test,
+        tk.Button(control_frame, text="Run Single Test", command=self.run_single_test,
                   bg="#f39c12", fg="white", font=("Arial", 10), width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(control_frame, text="📊 Show Mask Calc", command=self.show_mask_calc,
+        tk.Button(control_frame, text="Show Mask Calc", command=self.show_mask_calc,
                   bg="#16a085", fg="white", font=("Arial", 10), width=15).pack(side=tk.LEFT, padx=5)
-        tk.Button(control_frame, text="🧹 Clear Results", command=self.clear_results,
+        tk.Button(control_frame, text="Clear Results", command=self.clear_results,
                   bg="#95a5a6", fg="white", width=12).pack(side=tk.RIGHT, padx=5)
         
-        # Results Frame
         results_frame = tk.LabelFrame(self.parent, text=" Test Results ", padx=10, pady=5)
         results_frame.pack(fill=tk.BOTH, expand=True, padx=10, pady=5)
         
-        # Text widget for results
         self.txt_results = tk.Text(results_frame, wrap=tk.WORD, bg="#1e1e1e", fg="#00ff00", 
                                    font=("Courier", 10), insertbackground="white")
         scroll_y_res = ttk.Scrollbar(results_frame, orient=tk.VERTICAL, command=self.txt_results.yview)
@@ -1796,11 +1779,9 @@ class TestTabController:
         scroll_y_res.pack(side=tk.RIGHT, fill=tk.Y)
         self.txt_results.pack(fill=tk.BOTH, expand=True, side=tk.LEFT)
         
-        # Status Bar
         self.status_bar = tk.Label(self.parent, text="Ready", bd=1, relief=tk.SUNKEN, anchor=tk.W)
         self.status_bar.pack(fill=tk.X, side=tk.BOTTOM)
         
-        # Initialize with preset tables
         self.load_preset()
     
     def load_preset(self):
@@ -1844,7 +1825,6 @@ class TestTabController:
             if len(values) < 3:
                 continue
             name, addr_str, enabled = values[0], values[1], values[2]
-            # 確保所有值都是字符串
             name = str(name) if name else ""
             addr_str = str(addr_str) if addr_str else "0"
             enabled = str(enabled) if enabled else "No"
@@ -1884,13 +1864,13 @@ class TestTabController:
         
         tables = self.get_test_tables()
         if not tables:
-            self.log("❌ No tables configured!", "#FF0000")
+            self.log("ERROR: No tables configured!", "#FF0000")
             return
         
         try:
             base_addr = int(self.ent_test_base.get(), 16)
         except ValueError:
-            self.log("❌ Invalid Base Address!", "#FF0000")
+            self.log("ERROR: Invalid Base Address!", "#FF0000")
             return
         
         self.log(f"Base Address: 0x{base_addr:04X}")
@@ -1898,30 +1878,29 @@ class TestTabController:
         self.log("")
         
         # Test 1: Address Alignment
-        self.log("【TEST 1】Address Alignment & Validation", "#FFFF00")
+        self.log("[TEST 1] Address Alignment & Validation", "#FFFF00")
         self.log("-" * 40)
         self.run_alignment_test(tables, base_addr)
         self.log("")
         
         # Test 2: Mask Calculation
-        self.log("【TEST 2】Dynamic Mask Calculation", "#FFFF00")
+        self.log("[TEST 2] Dynamic Mask Calculation", "#FFFF00")
         self.log("-" * 40)
         self.run_mask_test(tables, base_addr)
         self.log("")
         
         # Test 3: Gap Detection
-        self.log("【TEST 3】Flash Address Gap Detection", "#FFFF00")
+        self.log("[TEST 3] Flash Address Gap Detection", "#FFFF00")
         self.log("-" * 40)
         self.run_gap_test(tables, base_addr)
         self.log("")
         
-        # Test 4: HEX Generation
-        self.log("【TEST 4】HEX Buffer Generation", "#FFFF00")
+        # Test 4: HEX Generation (using shared core)
+        self.log("[TEST 4] HEX Buffer Generation", "#FFFF00")
         self.log("-" * 40)
         self.run_hex_test(tables, base_addr)
         self.log("")
         
-        # Summary
         self.log("=" * 70)
         self.log("       Test Complete!", "#00FF00")
         self.log("=" * 70)
@@ -1937,24 +1916,23 @@ class TestTabController:
             new_addr, adjusted, warning = validate_and_align_flash_address(old_addr, base_addr)
             
             if adjusted:
-                self.log(f"  ⚠️  {table['name']}: 0x{old_addr:04X} → 0x{new_addr:04X}", "#FFA500")
+                self.log(f"  ADJUSTED: {table['name']}: 0x{old_addr:04X} -> 0x{new_addr:04X}", "#FFA500")
                 if warning:
                     self.log(f"      {warning}", "#888888")
             else:
-                self.log(f"  ✓ {table['name']}: 0x{new_addr:04X} (no change)", "#00FF00")
+                self.log(f"  OK: {table['name']}: 0x{new_addr:04X} (no change)", "#00FF00")
         
         self.log("")
-        self.log("✅ Test 1 Complete")
+        self.log("Test 1 Complete")
     
     def run_mask_test(self, tables, base_addr):
         """Run mask calculation test"""
         enabled_tables = [t for t in tables if t['enabled']]
         
         if not enabled_tables:
-            self.log("❌ No enabled tables!", "#FF0000")
+            self.log("ERROR: No enabled tables!", "#FF0000")
             return
         
-        # Calculate
         max_addr = max(t['addr'] for t in enabled_tables)
         mask_bytes, total_bits = calculate_dynamic_mask_bytes(max_addr, base_addr)
         mask_val, _, bit_mapping = calculate_enable_mask_with_gaps(enabled_tables, base_addr)
@@ -1968,119 +1946,95 @@ class TestTabController:
         
         for m in bit_mapping:
             gap_note = ""
-            # Check if there's a gap before this table
             for i, t in enumerate(enabled_tables):
                 if t['addr'] == m['addr'] and i > 0:
                     prev_addr = enabled_tables[i-1]['addr']
                     if m['addr'] > prev_addr + 256:
                         gap_blocks = (m['addr'] - prev_addr) // 256 - 1
-                        gap_note = f" ← Gap before! ({gap_blocks} blocks)"
+                        gap_note = f" <- Gap before! ({gap_blocks} blocks)"
                     break
             self.log(f"  Bit {m['bit_pos']:2d}: 0x{m['addr']:04X} - {m['name']}{gap_note}", "#00FFFF")
         
         self.log("")
-        self.log("✅ Test 2 Complete")
+        self.log("Test 2 Complete")
     
     def run_gap_test(self, tables, base_addr):
         """Run gap detection test"""
         enabled_tables = [t for t in tables if t['enabled']]
         
         if not enabled_tables:
-            self.log("❌ No enabled tables!", "#FF0000")
+            self.log("ERROR: No enabled tables!", "#FF0000")
             return
         
         max_addr = max(t['addr'] for t in enabled_tables)
         gaps = detect_flash_address_gaps(enabled_tables, base_addr, max_addr)
         
         if len(gaps) <= 1:
-            self.log("✓ No gaps detected - continuous memory layout", "#00FF00")
+            self.log("OK: No gaps detected - continuous memory layout", "#00FF00")
         else:
             self.log(f"Found {len(gaps)} gap(s):")
             for i, (start, end) in enumerate(gaps, 1):
                 blocks = (end - start) // 256 + 1
-                self.log(f"  Gap #{i}: 0x{start:04X} ~ 0x{end:04X} ({blocks} blocks) → Mask bit = 0", "#FFA500")
+                self.log(f"  Gap #{i}: 0x{start:04X} ~ 0x{end:04X} ({blocks} blocks) -> Mask bit = 0", "#FFA500")
                 self.log(f"      Memory range: [{start - base_addr}] ~ [{end - base_addr}]")
         
         self.log("")
-        self.log("✅ Test 3 Complete")
+        self.log("Test 3 Complete")
     
     def run_hex_test(self, tables, base_addr):
-        """Run HEX buffer generation test"""
-        enabled_tables = [t for t in tables if t['enabled']]
-        
-        if not enabled_tables:
-            self.log("❌ No enabled tables!", "#FF0000")
-            return
-        
-        # Create mock buffer
-        def create_mock_buffer(name):
+        """Run HEX buffer generation test using shared core function"""
+        # Build tables list with mock buffers
+        test_tables = []
+        for t in tables:
             buf = bytearray([0xFF] * 256)
-            buf[0] = ord(name[0]) if name else 0xAA
-            buf[1] = ord(name[1]) if len(name) > 1 else 0xBB
+            buf[0] = ord(t['name'][0]) if t['name'] else 0xAA
+            buf[1] = ord(t['name'][1]) if len(t['name']) > 1 else 0xBB
             buf[0xFE] = 0xAB
             buf[0xFF] = 0xCD
-            return buf
+            test_tables.append({
+                'name': t['name'],
+                'path': '',
+                'addr': t['addr'],
+                'enabled': t['enabled'],
+                'buffer': buf
+            })
         
-        max_addr = max(t['addr'] for t in enabled_tables)
-        total_size = (max_addr - base_addr) + 256
+        # Call shared core function
+        (success, buffer, mask_val, mask_bytes, total_size,
+         enabled_count, disabled_count, alignment_log, gap_count) = generate_integrated_hex(
+            tables=test_tables,
+            base_addr=base_addr,
+            output_path=None,  # Return buffer only
+            include_disabled=True
+        )
         
-        # Initialize with 0xFF (gap padding)
-        buffer = bytearray([0xFF] * total_size)
-        
-        self.log(f"Buffer Size: {total_size} bytes")
-        self.log(f"Initialized with: 0xFF (Gap padding)")
-        self.log("")
-        self.log("Placing tables:")
-        
-        for t in enabled_tables:
-            start = t['addr'] - base_addr
-            buffer[start:start+256] = create_mock_buffer(t['name'])
-            self.log(f"  ✓ {t['name']}: 0x{t['addr']:04X} → Buffer[{start}:{start+256}]", "#00FF00")
-        
-        # Verify gaps
-        self.log("")
-        self.log("Verifying gaps are 0xFF:")
-        enabled_addrs = [(t['addr'], t['addr'] + 256) for t in enabled_tables]
-        
-        all_gaps_ff = True
-        for t in enabled_tables:
-            for other_start, other_end in enabled_addrs:
-                if t['addr'] == other_start:
-                    continue
-                # Check gap before this table
-                prev_end = other_end
-                if t['addr'] > prev_end:
-                    gap_start = t['addr'] - base_addr
-                    prev_end_abs = prev_end - base_addr
-                    gap_data = buffer[prev_end_abs:gap_start]
-                    all_ff = all(b == 0xFF for b in gap_data)
-                    if not all_ff:
-                        all_gaps_ff = False
-        
-        if all_gaps_ff:
-            self.log("  ✓ All gaps filled with 0xFF", "#00FF00")
+        if success:
+            self.log(f"Buffer Size: {total_size} bytes")
+            self.log(f"Initialized with: 0xFF (Gap padding)")
+            self.log(f"Tables: {len(test_tables)} ({enabled_count}E/{disabled_count}D)")
+            self.log(f"Mask: 0x{mask_val:0{mask_bytes*2}X}")
+            self.log(f"Gaps: {gap_count}")
+            self.log("")
+            self.log("Test 4 Complete")
         else:
-            self.log("  ⚠️ Some gaps not filled with 0xFF", "#FFA500")
-        
-        self.log("")
-        self.log("✅ Test 4 Complete")
+            self.log("ERROR: HEX generation failed!", "#FF0000")
     
     def run_single_test(self):
         """Run single quick test"""
         self.txt_results.delete("1.0", tk.END)
-        self.log("【Quick Single Test】")
+        self.log("[Quick Single Test]")
         self.log("-" * 40)
         
         tables = self.get_test_tables()
         try:
             base_addr = int(self.ent_test_base.get(), 16)
         except ValueError:
-            self.log("❌ Invalid Base Address!", "#FF0000")
+            self.log("ERROR: Invalid Base Address!", "#FF0000")
             return
         
         enabled_tables = [t for t in tables if t['enabled']]
         if not enabled_tables:
-            self.log("❌ No enabled tables!", "#FF0000")
+            self.log("ERROR: No enabled tables!", "#FF0000")
             return
         
         max_addr = max(t['addr'] for t in enabled_tables)
@@ -2096,24 +2050,24 @@ class TestTabController:
     def show_mask_calc(self):
         """Show detailed mask calculation"""
         self.txt_results.delete("1.0", tk.END)
-        self.log("【Mask Calculation Details】", "#FFFF00")
+        self.log("[Mask Calculation Details]", "#FFFF00")
         self.log("=" * 50)
         
         tables = self.get_test_tables()
         try:
             base_addr = int(self.ent_test_base.get(), 16)
         except ValueError:
-            self.log("❌ Invalid Base Address!", "#FF0000")
+            self.log("ERROR: Invalid Base Address!", "#FF0000")
             return
         
         enabled_tables = [t for t in tables if t['enabled']]
         if not enabled_tables:
-            self.log("❌ No enabled tables!", "#FF0000")
+            self.log("ERROR: No enabled tables!", "#FF0000")
             return
         
-        self.log(f"Formula:")
-        self.log(f"  Bit_Position = (Flash_Addr - Base_Addr) // 256")
-        self.log(f"  Mask_Bytes = (Total_Bits + 7) // 8")
+        self.log("Formula:")
+        self.log("  Bit_Position = (Flash_Addr - Base_Addr) // 256")
+        self.log("  Mask_Bytes = (Total_Bits + 7) // 8")
         self.log("")
         
         max_addr = max(t['addr'] for t in enabled_tables)
@@ -2201,8 +2155,7 @@ if __name__ == "__main__":
             print(f"[-] Error loading config: {msg}")
             sys.exit(1)
             
-        # Core Fix: Dynamically update Mask Values inside the Packer Sections
-        # Any section that defines a mask target will receive the newly calculated Mask
+        # Dynamically update Mask Values inside the Packer Sections
         if dynamic_mask is not None:
             updated = False
             for sec in packer.sections:
